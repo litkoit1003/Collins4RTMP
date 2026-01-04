@@ -74,7 +74,7 @@ public final class VideoScreenRenderer {
             float nx = 0, ny = 0, nz = (float) SIGN;
 
             quadTwoSidedNoMirrorU(vc, entry,
-                    x1, y1, z,  x2, y2, z,  x3, y3, z,  x4, y4, z,
+                    x2, y1, z,  x1, y2, z,  x4, y3, z,  x3, y4, z,
                     overlay, light, nx, ny, nz);
 
         } else if (s.axis() == 1) { // XZ, Y фиксирован
