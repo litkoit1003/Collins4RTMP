@@ -2,18 +2,30 @@ package org.sawiq.collins.fabric.client.video;
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
-import org.bytedeco.javacv.Java2DFrameConverter;
+import org.bytedeco.ffmpeg.global.avutil;
 
 import javax.sound.sampled.LineUnavailableException;
-import java.awt.image.BufferedImage;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.ByteBuffer;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 
 public final class VideoPlayer {
 
     public interface FrameSink {
-        void initVideo(int videoW, int videoH, int targetW, int targetH);
-        void onFrame(int[] argb, int w, int h);
+        void initVideo(int videoW, int videoH, int targetW, int targetH, double fps);
+        void onFrame(int[] argb, int w, int h, long timestampUs);
         void onStop();
+        default void onPlaybackClockStart(long wallStartNs) {}
+        /** true если буфер ещё не полон (декодер может продолжать) */
+        default boolean canAcceptFrame() { return true; }
+        /** Получить свободный буфер из пула (или null если пул пуст) */
+        default int[] borrowBuffer() { return null; }
+        /** Вернуть буфер в пул после использования */
+        default void returnBuffer(int[] buf) {}
+        /** true когда буфер видео готов (можно начинать аудио) */
+        default boolean isBufferReady() { return true; }
     }
 
     private final FrameSink sink;
@@ -24,6 +36,11 @@ public final class VideoPlayer {
     private volatile long startPosMs = 0;
     private volatile float gain = 1.0f;
     private volatile VideoAudioPlayer currentAudio;
+    private volatile long startRequestEpochMs = 0;
+
+    private record CachedMeta(String resolvedUrl, int videoW, int videoH, double fps, long cachedAtMs) {}
+    private static final ConcurrentHashMap<String, CachedMeta> META_CACHE = new ConcurrentHashMap<>();
+    private static final long META_TTL_MS = 15L * 60L * 1000L;
 
     public VideoPlayer(FrameSink sink) {
         this.sink = sink;
@@ -37,10 +54,14 @@ public final class VideoPlayer {
         stop();
         this.startPosMs = Math.max(0L, startPosMs);
         this.gain = Math.max(0f, gain);
+        this.startRequestEpochMs = System.currentTimeMillis();
+
+        final String urlFinal = url;
 
         running = true;
-        thread = new Thread(() -> runLoop(url, blocksW, blocksH, loop), "Collins-VideoPlayer");
+        thread = new Thread(() -> runLoop(urlFinal, blocksW, blocksH, loop), "Collins-VideoPlayer");
         thread.setDaemon(true);
+        thread.setPriority(Thread.MAX_PRIORITY); // высокий приоритет для уменьшения GC пауз
         thread.start();
     }
 
@@ -68,9 +89,10 @@ public final class VideoPlayer {
             boolean first = true;
             while (running) {
                 long seekMs = first ? startPosMs : 0L;
+                long requestEpochMs = first ? startRequestEpochMs : 0L;
                 first = false;
 
-                playOnce(url, blocksW, blocksH, seekMs);
+                playOnce(url, blocksW, blocksH, seekMs, requestEpochMs);
 
                 if (!loop) break;
             }
@@ -80,18 +102,37 @@ public final class VideoPlayer {
         }
     }
 
-    private void playOnce(String url, int blocksW, int blocksH, long seekMs) {
-        int videoW, videoH;
+    private void playOnce(String url, int blocksW, int blocksH, long seekMs, long requestEpochMs) {
+        String originalUrl = url;
 
-        // 1) мета (ширина/высота)
-        try (FFmpegFrameGrabber meta = new FFmpegFrameGrabber(url)) {
-            meta.start();
-            videoW = meta.getImageWidth();
-            videoH = meta.getImageHeight();
-            meta.stop();
-        } catch (Exception e) {
-            System.out.println("[Collins] FFmpeg meta failed: " + e.getMessage());
-            return;
+        int videoW;
+        int videoH;
+        double fps;
+
+        CachedMeta cached = META_CACHE.get(originalUrl);
+        if (cached != null && (System.currentTimeMillis() - cached.cachedAtMs()) <= META_TTL_MS) {
+            url = cached.resolvedUrl();
+            videoW = cached.videoW();
+            videoH = cached.videoH();
+            fps = cached.fps();
+        } else {
+            String resolved = tryResolveUrl(url);
+            if (resolved != null) url = resolved;
+
+            try (FFmpegFrameGrabber meta = new FFmpegFrameGrabber(url)) {
+                applyNetOptions(meta);
+                meta.start();
+                videoW = meta.getImageWidth();
+                videoH = meta.getImageHeight();
+                fps = meta.getVideoFrameRate();
+                meta.stop();
+            } catch (Exception e) {
+                System.out.println("[Collins] FFmpeg meta failed: " + e.getMessage());
+                return;
+            }
+
+            if (fps <= 0) fps = 30.0;
+            META_CACHE.put(originalUrl, new CachedMeta(url, videoW, videoH, fps, System.currentTimeMillis()));
         }
 
         if (videoW <= 0 || videoH <= 0) {
@@ -101,111 +142,194 @@ public final class VideoPlayer {
 
         // 2) target размер
         VideoSizeUtil.Size target = VideoSizeUtil.pick(blocksW, blocksH, videoW, videoH);
-        sink.initVideo(videoW, videoH, target.w(), target.h());
 
         // 3) декод
         try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(url)) {
+            applyNetOptions(grabber);
             grabber.setImageWidth(target.w());
             grabber.setImageHeight(target.h());
+            grabber.setPixelFormat(avutil.AV_PIX_FMT_BGR24);
             grabber.start();
 
-            if (seekMs > 0) {
-                try { grabber.setTimestamp(seekMs * 1000L); }
-                catch (Exception e) { System.out.println("[Collins] seek failed: " + e.getMessage()); }
+            long openLagMs = (requestEpochMs > 0) ? Math.max(0L, System.currentTimeMillis() - requestEpochMs) : 0L;
+            long effectiveSeekMs = seekMs + openLagMs;
+
+            if (effectiveSeekMs > 0) {
+                long seekTargetUs = effectiveSeekMs * 1000L;
+                try {
+                    grabber.setTimestamp(seekTargetUs);
+                } catch (Exception e) {
+                    System.out.println("[Collins] seek failed: " + e.getMessage());
+                }
+
+                try {
+                    long nowUs = grabber.getTimestamp();
+                    if (nowUs >= 0 && nowUs + 50_000L < seekTargetUs) {
+                        int skipped = 0;
+
+                        long needUs = Math.max(0L, seekTargetUs - nowUs);
+                        long needMs = needUs / 1000L;
+
+                        int maxSkipped = (int) Math.min(20_000L, Math.max(600L, (long) (fps * (needMs / 1000.0) + 120)));
+
+                        long startSkipNs = System.nanoTime();
+                        long maxSkipNs = 2_000_000_000L;
+
+                        while (running && skipped < maxSkipped) {
+                            if (System.nanoTime() - startSkipNs > maxSkipNs) break;
+                            Frame f = grabber.grab();
+                            if (f == null) break;
+
+                            long ts = f.timestamp;
+                            if (ts <= 0) ts = grabber.getTimestamp();
+
+                            if (ts >= seekTargetUs - 50_000L) {
+                                // дальше пойдет обычный decode loop
+                                break;
+                            }
+
+                            skipped++;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
             }
 
             int sampleRate = grabber.getSampleRate() > 0 ? grabber.getSampleRate() : 48000;
             int channels = grabber.getAudioChannels() > 0 ? grabber.getAudioChannels() : 2;
             channels = Math.min(2, channels);
+            if (fps <= 0) {
+                fps = grabber.getVideoFrameRate();
+                if (fps <= 0) fps = 30.0;
+            }
+            
+            // инициализируем видео
+            sink.initVideo(videoW, videoH, target.w(), target.h(), fps);
 
-            double fps = grabber.getVideoFrameRate();
-            if (fps <= 0) fps = 30.0;
-
-            Java2DFrameConverter converter = new Java2DFrameConverter();
-
-            // пул буферов вместо clone()
-            final int bufferCount = 4;
+            // кэш для BGR24 данных (не буфер кадров - те теперь в VideoScreen)
             final int pixels = target.w() * target.h();
-            final int[][] buffers = new int[bufferCount][pixels];
-            int bufIndex = 0;
+            final byte[] tmpBytes = new byte[pixels * 3];
 
             boolean hasAnyAudio = false;
             long wallStartNs = 0;
-            double firstVideoSec = 0.0;
             boolean wallStarted = false;
 
             try (VideoAudioPlayer audio = new VideoAudioPlayer(sampleRate, channels)) {
                 currentAudio = audio;
                 audio.setGain(gain);
 
-                long baseVideoTsUs = Long.MIN_VALUE;
+                long baseStreamTsUs = Long.MIN_VALUE;
                 long videoFrameIndex = 0;
 
+                long lastDecodeLogNs = 0;
+                long DECODE_LOG_INTERVAL_NS = 2_000_000_000L;
+                long maxGrabUs = 0;
+                long maxConvertUs = 0;
+
                 while (running) {
+                    long grabStart = System.nanoTime();
                     Frame frame = grabber.grab();
+                    long grabEnd = System.nanoTime();
                     if (frame == null) break;
+
+                    long tsUsForPace = frame.timestamp;
+                    if (tsUsForPace <= 0) tsUsForPace = grabber.getTimestamp();
+
+                    if (tsUsForPace > 0 && baseStreamTsUs == Long.MIN_VALUE) {
+                        baseStreamTsUs = tsUsForPace;
+                    }
 
                     if (frame.samples != null) {
                         hasAnyAudio = true;
+
+                        if (!sink.isBufferReady()) {
+                            audio.prebufferSamples(frame.samples, channels);
+                            continue;
+                        }
+
+                        if (!wallStarted) {
+                            wallStarted = true;
+                            wallStartNs = System.nanoTime();
+                            sink.onPlaybackClockStart(wallStartNs);
+                            System.out.println("[Collins] Audio+Video sync start, buffer ready");
+                        }
+
+                        if (!audio.isStarted()) audio.startPlayback();
+                        if (audio.hasPrebuffer()) audio.flushPrebuffer();
                         audio.writeSamples(frame.samples, channels);
                         continue;
                     }
 
-                    if (frame.image == null) continue;
+                    if (frame.image == null || frame.image.length == 0) continue;
 
                     videoFrameIndex++;
 
-                    long tsUs = frame.timestamp;
-                    double videoSec;
-                    if (tsUs > 0) {
-                        if (baseVideoTsUs == Long.MIN_VALUE) baseVideoTsUs = tsUs;
-                        videoSec = (tsUs - baseVideoTsUs) / 1_000_000.0;
-                    } else {
-                        videoSec = (videoFrameIndex - 1) / fps;
-                    }
-
-                    // если нет аудио — синхра по wall-clock
                     if (!hasAnyAudio) {
-                        if (!wallStarted) {
-                            wallStarted = true;
-                            wallStartNs = System.nanoTime();
-                            firstVideoSec = videoSec;
-                        }
-
-                        double targetSec = videoSec - firstVideoSec;
-                        double wallSec = (System.nanoTime() - wallStartNs) / 1_000_000_000.0;
-                        double ahead = targetSec - wallSec;
-
-                        while (running && ahead > 0.002) {
-                            long ns = (long) ((ahead - 0.002) * 1_000_000_000.0);
-                            if (ns > 5_000_000L) ns = 5_000_000L;
-                            if (ns > 0) LockSupport.parkNanos(ns);
+                        // без аудио: декодер бежит пока буфер не полон
+                        // пейсинг делается на render thread
+                        while (running && !sink.canAcceptFrame()) {
+                            // буфер полон - ждём пока render thread освободит место
+                            LockSupport.parkNanos(1_000_000L); // 1ms
                             if (Thread.interrupted()) return;
-
-                            wallSec = (System.nanoTime() - wallStartNs) / 1_000_000_000.0;
-                            ahead = targetSec - wallSec;
                         }
                     }
 
-                    BufferedImage img = converter.getBufferedImage(frame);
-                    if (img == null) continue;
+                    long convertStart = System.nanoTime(); // ПОСЛЕ пейсинга
 
-                    int[] out = buffers[bufIndex];
-                    bufIndex++;
-                    if (bufIndex >= bufferCount) bufIndex = 0;
+                    // получаем буфер из пула (управляется VideoScreen)
+                    int[] out = sink.borrowBuffer();
+                    if (out == null) {
+                        // пул пуст - ждём
+                        LockSupport.parkNanos(1_000_000L);
+                        continue;
+                    }
 
-                    // ВАЖНО: всегда читаем ровно target.w/target.h
                     int w = target.w();
                     int h = target.h();
-                    img.getRGB(0, 0, w, h, out, 0, target.w());
 
-                    // ARGB -> ABGR (swap R/B) для быстрой заливки NativeImage через память
-                    for (int i = 0; i < pixels; i++) {
-                        int c = out[i];
-                        out[i] = (c & 0xFF00FF00) | ((c & 0x00FF0000) >>> 16) | ((c & 0x000000FF) << 16);
+                    // прямое чтение из ByteBuffer (BGR24 формат)
+                    ByteBuffer bb = (ByteBuffer) frame.image[0];
+                    if (bb == null) continue;
+
+                    int strideBytes = frame.imageStride;
+                    int rowBytes = w * 3;
+                    
+                    // читаем напрямую через bulk get в кэшированный byte[]
+                    if (strideBytes <= 0 || strideBytes == rowBytes) {
+                        bb.position(0);
+                        bb.get(tmpBytes, 0, Math.min(tmpBytes.length, bb.remaining()));
+                    } else {
+                        // с учётом stride
+                        for (int y = 0; y < h; y++) {
+                            bb.position(y * strideBytes);
+                            bb.get(tmpBytes, y * rowBytes, Math.min(rowBytes, bb.remaining()));
+                        }
+                    }
+                    
+                    // BGR24 -> ABGR (0xAABBGGRR)
+                    for (int i = 0, j = 0; i < pixels; i++, j += 3) {
+                        int b = tmpBytes[j] & 0xFF;
+                        int g = tmpBytes[j + 1] & 0xFF;
+                        int r = tmpBytes[j + 2] & 0xFF;
+                        out[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
                     }
 
-                    sink.onFrame(out, target.w(), target.h());
+                    long convertEnd = System.nanoTime();
+
+                    long grabUs = (grabEnd - grabStart) / 1000L;
+                    long convertUs = (convertEnd - convertStart) / 1000L; // только конвертация, без пейсинга
+                    if (grabUs > maxGrabUs) maxGrabUs = grabUs;
+                    if (convertUs > maxConvertUs) maxConvertUs = convertUs;
+
+                    if (convertEnd - lastDecodeLogNs >= DECODE_LOG_INTERVAL_NS) {
+                        lastDecodeLogNs = convertEnd;
+                        System.out.println("[Collins] decode peak: grab=" + maxGrabUs + "us convert=" + maxConvertUs + "us");
+                        maxGrabUs = 0;
+                        maxConvertUs = 0;
+                    }
+
+                    long relativeTs = (baseStreamTsUs != Long.MIN_VALUE && tsUsForPace > 0) ? (tsUsForPace - baseStreamTsUs) : 0;
+                    sink.onFrame(out, target.w(), target.h(), relativeTs);
                 }
 
             } catch (LineUnavailableException e) {
@@ -219,5 +343,85 @@ public final class VideoPlayer {
         } catch (Exception e) {
             System.out.println("[Collins] FFmpeg decode failed: " + e.getMessage());
         }
+    }
+
+    private static void applyNetOptions(FFmpegFrameGrabber g) {
+        // эти опции особенно важны для ссылок с редиректами/плавающей скоростью (drive/usercontent и т.п.)
+        try {
+            // reconnect
+            g.setOption("reconnect", "1");
+            g.setOption("reconnect_streamed", "1");
+            g.setOption("reconnect_delay_max", "2");
+
+            // timeouts (в микросекундах)
+            g.setOption("rw_timeout", "8000000");
+
+            // faster stream detection
+            g.setOption("probesize", "2000000");
+            g.setOption("analyzeduration", "2000000");
+
+            // user-agent (многие хосты хуже отвечают на дефолтный ffmpeg UA)
+            g.setOption("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+
+            // keep probing minimal (some hosts need this)
+            g.setOption("fflags", "nobuffer");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String tryResolveUrl(String url) {
+        if (url == null) return null;
+        String u = url.trim();
+        if (!(u.startsWith("http://") || u.startsWith("https://"))) return null;
+
+        // Google Drive / usercontent часто делает несколько редиректов.
+        // FFmpeg умеет редиректы, но иногда долго; попробуем быстро получить финальный URL.
+        try {
+            String cur = u;
+            for (int i = 0; i < 5; i++) {
+                URL base = new URL(cur);
+                HttpURLConnection c = (HttpURLConnection) base.openConnection();
+                c.setInstanceFollowRedirects(false);
+                c.setRequestMethod("HEAD");
+                c.setConnectTimeout(4000);
+                c.setReadTimeout(4000);
+                c.setRequestProperty("User-Agent", "Mozilla/5.0");
+
+                int code;
+                try {
+                    code = c.getResponseCode();
+                } catch (Exception headFailed) {
+                    try {
+                        c.disconnect();
+                    } catch (Exception ignored) {}
+
+                    c = (HttpURLConnection) base.openConnection();
+                    c.setInstanceFollowRedirects(false);
+                    c.setRequestMethod("GET");
+                    c.setConnectTimeout(4000);
+                    c.setReadTimeout(4000);
+                    c.setRequestProperty("User-Agent", "Mozilla/5.0");
+                    c.setRequestProperty("Range", "bytes=0-0");
+                    code = c.getResponseCode();
+                }
+
+                if (code >= 300 && code < 400) {
+                    String loc = c.getHeaderField("Location");
+                    if (loc == null || loc.isBlank()) {
+                        c.disconnect();
+                        break;
+                    }
+                    URL next = new URL(base, loc);
+                    c.disconnect();
+                    cur = next.toString();
+                    continue;
+                }
+
+                c.disconnect();
+                return cur.equals(u) ? null : cur;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 }

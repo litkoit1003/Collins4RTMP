@@ -10,6 +10,7 @@ import org.sawiq.collins.paper.net.CollinsMessenger;
 import org.sawiq.collins.paper.selection.SelectionService;
 import org.sawiq.collins.paper.state.CollinsRuntimeState;
 import org.sawiq.collins.paper.store.ScreenStore;
+import org.sawiq.collins.paper.util.Lang;
 
 public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
@@ -17,9 +18,14 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private CollinsMessenger messenger;
     private SelectionService selection;
     private CollinsRuntimeState runtime;
+    private Lang lang;
 
     @Override
     public void onEnable() {
+        saveDefaultConfig();
+        String language = getConfig().getString("language", "en");
+        lang = new Lang(this, language);
+
         store = new ScreenStore(this);
         store.load();
 
@@ -28,7 +34,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
         messenger = new CollinsMessenger(this, store, runtime);
 
-        var cmd = new CollinsCommand(this, store, messenger, selection, runtime);
+        var cmd = new CollinsCommand(this, store, messenger, selection, runtime, lang);
         var pluginCmd = getCommand("collins");
         if (pluginCmd != null) {
             pluginCmd.setExecutor(cmd);
@@ -41,6 +47,10 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         Bukkit.getMessenger().registerOutgoingPluginChannel(this, "collins:main");
 
         getLogger().info("collins-paper enabled. Loaded screens: " + store.all().size());
+    }
+
+    public Lang lang() {
+        return lang;
     }
 
     @Override

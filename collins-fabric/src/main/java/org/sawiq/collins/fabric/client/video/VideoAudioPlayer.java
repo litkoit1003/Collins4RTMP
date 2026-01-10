@@ -2,9 +2,8 @@ package org.sawiq.collins.fabric.client.video;
 
 import javax.sound.sampled.*;
 import java.nio.Buffer;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.ShortBuffer;
+import java.util.concurrent.locks.LockSupport;
 
 public final class VideoAudioPlayer implements AutoCloseable {
 
@@ -12,7 +11,15 @@ public final class VideoAudioPlayer implements AutoCloseable {
     private final int channels;
     private final SourceDataLine line;
 
+    private volatile boolean started;
+
     private volatile float gain = 1.0f;
+
+    private byte[] pcmBuf = new byte[0];
+
+    private final int prebufferMaxBytes;
+    private byte[] prebuffer = new byte[0];
+    private int prebufferLen = 0;
 
     public VideoAudioPlayer(int sampleRate, int channels) throws LineUnavailableException {
         this.sampleRate = sampleRate;
@@ -23,7 +30,20 @@ public final class VideoAudioPlayer implements AutoCloseable {
 
         this.line = (SourceDataLine) AudioSystem.getLine(info);
         this.line.open(fmt);
-        this.line.start();
+        this.started = false;
+
+        int bytesPerSecond = sampleRate * channels * 2;
+        this.prebufferMaxBytes = Math.max(65536, bytesPerSecond * 4);
+    }
+
+    public void startPlayback() {
+        if (started) return;
+        line.start();
+        started = true;
+    }
+
+    public boolean isStarted() {
+        return started;
     }
 
     public void setGain(float gain) {
@@ -34,10 +54,39 @@ public final class VideoAudioPlayer implements AutoCloseable {
         try { line.stop(); } catch (Exception ignored) {}
         try { line.flush(); } catch (Exception ignored) {}
         try { line.close(); } catch (Exception ignored) {}
+        started = false;
+        prebufferLen = 0;
+    }
+
+    public boolean hasPrebuffer() {
+        return prebufferLen > 0;
+    }
+
+    public void prebufferSamples(Buffer[] samples, int channelsWanted) {
+        if (samples == null || samples.length == 0) return;
+        if (!(samples[0] instanceof ShortBuffer)) return;
+
+        int pcmLen = toPcm16le(samples, channelsWanted);
+        if (pcmLen <= 0) return;
+
+        if (prebufferLen + pcmLen > prebufferMaxBytes) return;
+        ensurePrebufferCapacity(prebufferLen + pcmLen);
+        System.arraycopy(pcmBuf, 0, prebuffer, prebufferLen, pcmLen);
+        prebufferLen += pcmLen;
+    }
+
+    public void flushPrebuffer() {
+        if (prebufferLen <= 0) return;
+        writePcmNonBlocking(prebuffer, prebufferLen);
+        prebufferLen = 0;
     }
 
     public double timeSeconds() {
         return line.getMicrosecondPosition() / 1_000_000.0;
+    }
+
+    public long timeUs() {
+        return line.getMicrosecondPosition();
     }
 
     public void writeSamples(Buffer[] samples, int channelsWanted) {
@@ -45,25 +94,28 @@ public final class VideoAudioPlayer implements AutoCloseable {
 
         // чаще всего JavaCV даёт ShortBuffer
         if (samples[0] instanceof ShortBuffer) {
-            byte[] pcm = toPcm16le(samples, channelsWanted);
-            if (pcm != null && pcm.length > 0) {
-                line.write(pcm, 0, pcm.length);
+            int pcmLen = toPcm16le(samples, channelsWanted);
+            if (pcmLen > 0) {
+                writePcmNonBlocking(pcmBuf, pcmLen);
             }
         }
     }
 
-    private byte[] toPcm16le(Buffer[] samples, int channelsWanted) {
+    private int toPcm16le(Buffer[] samples, int channelsWanted) {
         float g = this.gain;
 
         if (channelsWanted <= 1) {
             ShortBuffer sb = ((ShortBuffer) samples[0]).duplicate();
-            ByteBuffer bb = ByteBuffer.allocate(sb.remaining() * 2).order(ByteOrder.LITTLE_ENDIAN);
+            int len = sb.remaining() * 2;
+            ensureCapacity(len);
 
+            int o = 0;
             while (sb.hasRemaining()) {
-                short s = sb.get();
-                bb.putShort(scaleClamp(s, g));
+                short s = scaleClamp(sb.get(), g);
+                pcmBuf[o++] = (byte) (s & 0xFF);
+                pcmBuf[o++] = (byte) ((s >>> 8) & 0xFF);
             }
-            return bb.array();
+            return o;
         }
 
         // stereo: либо planar (L,R), либо interleaved
@@ -72,23 +124,61 @@ public final class VideoAudioPlayer implements AutoCloseable {
             ShortBuffer r = ((ShortBuffer) samples[1]).duplicate();
 
             int n = Math.min(l.remaining(), r.remaining());
-            ByteBuffer bb = ByteBuffer.allocate(n * 2 * 2).order(ByteOrder.LITTLE_ENDIAN);
+            int len = n * 2 * 2;
+            ensureCapacity(len);
 
+            int o = 0;
             for (int i = 0; i < n; i++) {
-                bb.putShort(scaleClamp(l.get(), g));
-                bb.putShort(scaleClamp(r.get(), g));
+                short sl = scaleClamp(l.get(), g);
+                pcmBuf[o++] = (byte) (sl & 0xFF);
+                pcmBuf[o++] = (byte) ((sl >>> 8) & 0xFF);
+
+                short sr = scaleClamp(r.get(), g);
+                pcmBuf[o++] = (byte) (sr & 0xFF);
+                pcmBuf[o++] = (byte) ((sr >>> 8) & 0xFF);
             }
-            return bb.array();
+            return o;
         }
 
         // interleaved
         ShortBuffer sb = ((ShortBuffer) samples[0]).duplicate();
-        ByteBuffer bb = ByteBuffer.allocate(sb.remaining() * 2).order(ByteOrder.LITTLE_ENDIAN);
+        int len = sb.remaining() * 2;
+        ensureCapacity(len);
 
+        int o = 0;
         while (sb.hasRemaining()) {
-            bb.putShort(scaleClamp(sb.get(), g));
+            short s = scaleClamp(sb.get(), g);
+            pcmBuf[o++] = (byte) (s & 0xFF);
+            pcmBuf[o++] = (byte) ((s >>> 8) & 0xFF);
         }
-        return bb.array();
+        return o;
+    }
+
+    private void ensureCapacity(int len) {
+        if (pcmBuf.length >= len) return;
+        pcmBuf = new byte[len];
+    }
+
+    private void ensurePrebufferCapacity(int len) {
+        if (prebuffer.length >= len) return;
+        prebuffer = new byte[len];
+    }
+
+    private void writePcmNonBlocking(byte[] pcm, int len) {
+        int off = 0;
+        while (off < len) {
+            if (Thread.interrupted()) return;
+
+            int avail = line.available();
+            if (avail <= 0) {
+                LockSupport.parkNanos(1_000_000L);
+                continue;
+            }
+
+            int n = Math.min(avail, len - off);
+            line.write(pcm, off, n);
+            off += n;
+        }
     }
 
     private static short scaleClamp(short s, float g) {

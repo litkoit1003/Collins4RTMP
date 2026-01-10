@@ -10,6 +10,7 @@ import org.sawiq.collins.paper.selection.SelectionService;
 import org.sawiq.collins.paper.selection.SelectionVisualizer;
 import org.sawiq.collins.paper.state.CollinsRuntimeState;
 import org.sawiq.collins.paper.store.ScreenStore;
+import org.sawiq.collins.paper.util.Lang;
 import org.sawiq.collins.paper.util.ScreenFactory;
 
 import java.util.*;
@@ -21,17 +22,20 @@ public final class CollinsCommand implements TabExecutor {
     private final CollinsMessenger messenger;
     private final SelectionService selection;
     private final CollinsRuntimeState runtime;
+    private final Lang lang;
 
     public CollinsCommand(JavaPlugin plugin,
                           ScreenStore store,
                           CollinsMessenger messenger,
                           SelectionService selection,
-                          CollinsRuntimeState runtime) {
+                          CollinsRuntimeState runtime,
+                          Lang lang) {
         this.plugin = plugin;
         this.store = store;
         this.messenger = messenger;
         this.selection = selection;
         this.runtime = runtime;
+        this.lang = lang;
     }
 
     @Override
@@ -39,12 +43,12 @@ public final class CollinsCommand implements TabExecutor {
         if (!(sender instanceof Player p)) return true;
 
         if (!p.hasPermission("collins.admin")) {
-            p.sendMessage("No permission.");
+            lang.send(p, "error.no_permission");
             return true;
         }
 
         if (args.length == 0) {
-            p.sendMessage("/collins pos1|pos2|create|seturl|play|stop|pause|resume|volume|radius|remove|list|sync");
+            lang.send(p, "cmd.help");
             return true;
         }
 
@@ -53,17 +57,25 @@ public final class CollinsCommand implements TabExecutor {
         switch (sub) {
             case "pos1" -> {
                 Block target = p.getTargetBlockExact(200);
-                if (target == null) { p.sendMessage("No target block."); return true; }
+                if (target == null) { lang.send(p, "error.no_target_block"); return true; }
                 selection.setPos1(p, target);
-                p.sendMessage("pos1 = " + target.getX() + " " + target.getY() + " " + target.getZ());
+                lang.send(p, "cmd.pos1.set", lang.vars(
+                        "x", target.getX(),
+                        "y", target.getY(),
+                        "z", target.getZ()
+                ));
                 return true;
             }
 
             case "pos2" -> {
                 Block target = p.getTargetBlockExact(200);
-                if (target == null) { p.sendMessage("No target block."); return true; }
+                if (target == null) { lang.send(p, "error.no_target_block"); return true; }
                 selection.setPos2(p, target);
-                p.sendMessage("pos2 = " + target.getX() + " " + target.getY() + " " + target.getZ());
+                lang.send(p, "cmd.pos2.set", lang.vars(
+                        "x", target.getX(),
+                        "y", target.getY(),
+                        "z", target.getZ()
+                ));
 
                 var sel = selection.get(p);
                 if (sel.complete() && sel.pos1().getWorld().equals(sel.pos2().getWorld())) {
@@ -78,22 +90,22 @@ public final class CollinsCommand implements TabExecutor {
             }
 
             case "create" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins create <name>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins create <name>")); return true; }
                 String name = args[1];
 
                 var sel = selection.get(p);
                 if (!sel.complete()) {
-                    p.sendMessage("Selection not complete. Use /collins pos1 and /collins pos2.");
+                    lang.send(p, "error.selection_not_complete");
                     return true;
                 }
                 if (!sel.pos1().getWorld().equals(sel.pos2().getWorld())) {
-                    p.sendMessage("pos1/pos2 must be in same world.");
+                    lang.send(p, "error.selection_world_mismatch");
                     return true;
                 }
 
                 Screen screen = ScreenFactory.create(name, sel.pos1(), sel.pos2());
                 if (screen == null) {
-                    p.sendMessage("Selection must be a rectangle plane with thickness 1 block (XY/XZ/YZ) and size >= 2x2.");
+                    lang.send(p, "error.selection_invalid");
                     return true;
                 }
 
@@ -105,18 +117,18 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Created screen: " + name);
+                lang.send(p, "cmd.screen.created", lang.vars("name", name));
                 return true;
             }
 
             case "seturl" -> {
-                if (args.length < 3) { p.sendMessage("Usage: /collins seturl <screen> <url>"); return true; }
+                if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins seturl <screen> <url>")); return true; }
 
                 String name = args[1];
                 String url = args[2];
 
                 Screen s = store.get(name);
-                if (s == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 Screen updated = new Screen(
                         s.name(), s.world(),
@@ -143,16 +155,16 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("URL set for " + name);
+                lang.send(p, "cmd.url.set", lang.vars("name", name));
                 return true;
             }
 
             case "play" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins play <screen>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins play <screen>")); return true; }
                 String name = args[1];
 
                 Screen s = store.get(name);
-                if (s == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 // play = старт с нуля
                 CollinsRuntimeState.Playback pb = runtime.get(s.name());
@@ -175,16 +187,16 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Playing " + name);
+                lang.send(p, "cmd.playing", lang.vars("name", name));
                 return true;
             }
 
             case "stop" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins stop <screen>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins stop <screen>")); return true; }
                 String name = args[1];
 
                 Screen s = store.get(name);
-                if (s == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 // stop = выключить и сбросить позицию на 0
                 runtime.resetPlayback(s.name());
@@ -205,16 +217,16 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Stopped " + name);
+                lang.send(p, "cmd.stopped", lang.vars("name", name));
                 return true;
             }
 
             case "pause" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins pause <screen>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins pause <screen>")); return true; }
                 String name = args[1];
 
                 Screen s = store.get(name);
-                if (s == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 // pause = выключить, но сохранить позицию
                 long now = System.currentTimeMillis();
@@ -240,16 +252,16 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Paused " + name);
+                lang.send(p, "cmd.paused", lang.vars("name", name));
                 return true;
             }
 
             case "resume" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins resume <screen>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins resume <screen>")); return true; }
                 String name = args[1];
 
                 Screen s = store.get(name);
-                if (s == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 CollinsRuntimeState.Playback pb = runtime.get(s.name());
                 pb.startEpochMs = System.currentTimeMillis();
@@ -270,72 +282,72 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Resumed " + name);
+                lang.send(p, "cmd.resumed", lang.vars("name", name));
                 return true;
             }
 
             case "volume" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins volume set <0..2> | reset"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins volume set <0..2> | reset")); return true; }
 
                 String act = args[1].toLowerCase(Locale.ROOT);
                 if (act.equals("reset")) {
                     runtime.globalVolume = 1.0f;
                     messenger.broadcastSync();
-                    p.sendMessage("Global volume reset to 1.0");
+                    lang.send(p, "cmd.global_volume.reset");
                     return true;
                 }
 
                 if (act.equals("set")) {
-                    if (args.length < 3) { p.sendMessage("Usage: /collins volume set <0..2>"); return true; }
+                    if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins volume set <0..2>")); return true; }
                     float v;
                     try { v = Float.parseFloat(args[2]); }
-                    catch (Exception e) { p.sendMessage("Bad number."); return true; }
+                    catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
 
                     v = Math.max(0f, Math.min(2f, v));
                     runtime.globalVolume = v;
                     messenger.broadcastSync();
-                    p.sendMessage("Global volume = " + v);
+                    lang.send(p, "cmd.global_volume.set", lang.vars("value", v));
                     return true;
                 }
 
-                p.sendMessage("Usage: /collins volume set <0..2> | reset");
+                lang.send(p, "error.usage", lang.vars("usage", "/collins volume set <0..2> | reset"));
                 return true;
             }
 
             case "radius" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins radius set <1..512> | reset"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins radius set <1..512> | reset")); return true; }
 
                 String act = args[1].toLowerCase(Locale.ROOT);
                 if (act.equals("reset")) {
                     runtime.hearRadius = 100;
                     messenger.broadcastSync();
-                    p.sendMessage("Hear radius reset to 100");
+                    lang.send(p, "cmd.hear_radius.reset");
                     return true;
                 }
 
                 if (act.equals("set")) {
-                    if (args.length < 3) { p.sendMessage("Usage: /collins radius set <1..512>"); return true; }
+                    if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins radius set <1..512>")); return true; }
                     int r;
                     try { r = Integer.parseInt(args[2]); }
-                    catch (Exception e) { p.sendMessage("Bad number."); return true; }
+                    catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
 
                     r = Math.max(1, Math.min(512, r));
                     runtime.hearRadius = r;
                     messenger.broadcastSync();
-                    p.sendMessage("Hear radius = " + r);
+                    lang.send(p, "cmd.hear_radius.set", lang.vars("value", r));
                     return true;
                 }
 
-                p.sendMessage("Usage: /collins radius set <1..512> | reset");
+                lang.send(p, "error.usage", lang.vars("usage", "/collins radius set <1..512> | reset"));
                 return true;
             }
 
             case "remove" -> {
-                if (args.length < 2) { p.sendMessage("Usage: /collins remove <screen>"); return true; }
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins remove <screen>")); return true; }
                 String name = args[1];
 
                 Screen removed = store.remove(name);
-                if (removed == null) { p.sendMessage("Screen not found: " + name); return true; }
+                if (removed == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 store.save();
                 runtime.resetPlayback(removed.name());
@@ -343,26 +355,24 @@ public final class CollinsCommand implements TabExecutor {
                 messenger.broadcastSync();
                 SelectionVisualizer.stop(p);
 
-                p.sendMessage("Removed screen: " + name);
+                lang.send(p, "cmd.screen.removed", lang.vars("name", name));
                 return true;
             }
 
             case "list" -> {
-                p.sendMessage("Screens:");
+                lang.send(p, "cmd.screens.header");
                 for (Screen s : store.all()) {
-                    p.sendMessage("- " + s.name() + " url=" + (s.mp4Url() == null ? "" : s.mp4Url()) + " playing=" + s.playing());
+                    lang.send(p, "cmd.screens.item", lang.vars(
+                            "name", s.name(),
+                            "url", (s.mp4Url() == null ? "" : s.mp4Url()),
+                            "playing", s.playing()
+                    ));
                 }
                 return true;
             }
 
-            case "sync" -> {
-                messenger.broadcastSync();
-                p.sendMessage("Broadcasted SYNC to all players.");
-                return true;
-            }
-
             default -> {
-                p.sendMessage("Unknown subcommand.");
+                lang.send(p, "error.usage", lang.vars("usage", "/collins"));
                 return true;
             }
         }
@@ -377,7 +387,7 @@ public final class CollinsCommand implements TabExecutor {
                     "pos1", "pos2", "create", "seturl",
                     "play", "stop", "pause", "resume",
                     "volume", "radius",
-                    "remove", "list", "sync"
+                    "remove", "list"
             ));
         }
 

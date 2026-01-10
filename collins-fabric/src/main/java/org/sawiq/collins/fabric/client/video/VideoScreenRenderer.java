@@ -40,6 +40,7 @@ public final class VideoScreenRenderer {
         MatrixStack.Entry entry = matrices.peek();
 
         for (VideoScreen screen : VideoScreenManager.all()) {
+            screen.renderPlayback();
             if (!screen.hasTexture()) continue;
             drawScreen(entry, consumers, screen.state(), screen.textureId());
         }
