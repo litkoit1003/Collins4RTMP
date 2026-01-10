@@ -6,6 +6,7 @@ import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.system.MemoryUtil;
+import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
 import org.sawiq.collins.fabric.mixin.NativeImageAccessor;
 
@@ -16,6 +17,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class VideoScreen implements VideoPlayer.FrameSink {
+
+    private static final boolean DEBUG = false;
 
     private ScreenState state;
 
@@ -32,6 +35,13 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private volatile boolean started = false;
     private String startedUrl = "";
     private float lastGain = -1f;
+
+    private volatile long durationMs = 0;
+
+    private volatile boolean displayFrozen = false;
+    private volatile long displayFrozenPosMs = 0;
+    private volatile long displayStartPosMs = 0;
+    private volatile long displayWallStartNs = 0;
 
     // ===== Очередь кадров для буферизации =====
     private record InitReq(int videoW, int videoH, int targetW, int targetH, double fps) {}
@@ -75,7 +85,28 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     public ScreenState state() { return state; }
 
-    public void updateState(ScreenState newState) { this.state = newState; }
+    public void updateState(ScreenState newState) {
+        ScreenState old = this.state;
+        this.state = newState;
+
+        if (old == null || newState == null) return;
+
+        if (!started) return;
+        if (!old.playing() || !newState.playing()) return;
+
+        String ou = old.url();
+        String nu = newState.url();
+        if (ou == null || nu == null) return;
+        if (!ou.equals(nu)) return;
+
+        long db = Math.abs(newState.basePosMs() - old.basePosMs());
+        long ds = Math.abs(newState.startEpochMs() - old.startEpochMs());
+
+        // если сервер сдвинул якоря таймлайна (seek/resume) — перезапускаем декодер
+        if (db > 250L || ds > 250L) {
+            stop();
+        }
+    }
 
     public boolean hasTexture() { return texture != null && texId != null; }
 
@@ -94,6 +125,14 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         applyPendingStop();
         applyPendingInit();
 
+        CollinsClientConfig cfg = CollinsClientConfig.get();
+
+        // 1.1) если в конфиге выключено — полностью останавливаем (и видео, и звук)
+        if (!cfg.renderVideo) {
+            stop();
+            return;
+        }
+
         // 2) управление воспроизведением
         if (state.url() == null || state.url().isEmpty() || !state.playing()) {
             stop();
@@ -107,7 +146,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
 
         long posMs = currentVideoPosMs(serverNowMs);
-        float gain = Math.max(0f, globalVolume) * Math.max(0f, state.volume());
+        float gain = Math.max(0f, globalVolume) * Math.max(0f, state.volume()) * cfg.localVolumeMultiplier();
 
         if (player == null) player = new VideoPlayer(this);
 
@@ -115,6 +154,10 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             started = true;
             startedUrl = state.url();
             lastGain = gain;
+            displayFrozen = true;
+            displayFrozenPosMs = posMs;
+            displayStartPosMs = posMs;
+            displayWallStartNs = 0;
             player.start(state.url(), state.blocksW(), state.blocksH(), state.loop(), posMs, gain);
             return;
         }
@@ -132,7 +175,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
         if (tickEnd - lastTickLogNs >= TICK_LOG_INTERVAL_NS) {
             lastTickLogNs = tickEnd;
-            System.out.println("[Collins] tick peak: gap=" + maxTickGapUs + "us duration=" + maxTickDurationUs + "us");
+            if (DEBUG) System.out.println("[Collins] tick peak: gap=" + maxTickGapUs + "us duration=" + maxTickDurationUs + "us");
             maxTickGapUs = 0;
             maxTickDurationUs = 0;
         }
@@ -140,6 +183,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     public void renderPlayback() {
         if (!started) return;
+        if (!CollinsClientConfig.get().renderVideo) return;
         uploadPendingFrameFast();
     }
 
@@ -172,6 +216,11 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         playbackStartNs = 0;
         framesShown = 0;
         lastUploadLogNs = 0;
+
+        displayFrozen = false;
+        displayFrozenPosMs = 0;
+        displayStartPosMs = 0;
+        displayWallStartNs = 0;
     }
 
     private void applyPendingInit() {
@@ -226,7 +275,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             freeBuffers.offer(new int[pixels]);
         }
 
-        System.out.println("[Collins] initVideo " + texW + "x" + texH + " fps=" + videoFps + " pool=" + BUFFER_POOL_SIZE + " buffering...");
+        if (DEBUG) System.out.println("[Collins] initVideo " + texW + "x" + texH + " fps=" + videoFps + " pool=" + BUFFER_POOL_SIZE + " buffering...");
     }
 
     /**
@@ -243,15 +292,20 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             long now = System.nanoTime();
             if (now - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
                 lastUploadLogNs = now;
-                System.out.println("[Collins] buffering... " + queueSize + "/" + MIN_BUFFER_FRAMES + " frames");
+                if (DEBUG) System.out.println("[Collins] buffering... " + queueSize + "/" + MIN_BUFFER_FRAMES + " frames");
             }
             if (queueSize < MIN_BUFFER_FRAMES) {
                 return; // ещё буферизуем
             }
             buffering = false;
             if (playbackStartNs == 0) playbackStartNs = System.nanoTime();
+            if (displayWallStartNs == 0) {
+                displayWallStartNs = playbackStartNs;
+                displayStartPosMs = displayFrozenPosMs;
+                displayFrozen = false;
+            }
             framesShown = 0;
-            System.out.println("[Collins] buffering done, queue=" + queueSize + " frames, fps=" + videoFps);
+            if (DEBUG) System.out.println("[Collins] buffering done, queue=" + queueSize + " frames, fps=" + videoFps);
         }
 
         if (playbackStartNs == 0) playbackStartNs = System.nanoTime();
@@ -314,7 +368,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         if (end - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
             lastUploadLogNs = end;
             long lagUs = elapsedUs - frame.timestampUs();
-            System.out.println("[Collins] frame " + framesShown + " ts=" + (frame.timestampUs()/1000) + "ms lag=" + (lagUs/1000) + "ms queue=" + queueSize);
+            if (DEBUG) System.out.println("[Collins] frame " + framesShown + " ts=" + (frame.timestampUs()/1000) + "ms lag=" + (lagUs/1000) + "ms queue=" + queueSize);
         }
     }
 
@@ -322,6 +376,26 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         long base = Math.max(0L, state.basePosMs());
         if (serverNowMs <= 0 || state.startEpochMs() <= 0) return base;
         return base + Math.max(0L, serverNowMs - state.startEpochMs());
+    }
+
+    public long currentPosMs(long serverNowMs) {
+        return currentVideoPosMs(serverNowMs);
+    }
+
+    public long currentPosMsForDisplay(long serverNowMs) {
+        if (displayFrozen) {
+            return Math.max(0L, displayFrozenPosMs);
+        }
+        long ws = displayWallStartNs;
+        if (ws > 0) {
+            long elapsedMs = Math.max(0L, (System.nanoTime() - ws) / 1_000_000L);
+            return Math.max(0L, displayStartPosMs + elapsedMs);
+        }
+        return currentVideoPosMs(serverNowMs);
+    }
+
+    public long durationMs() {
+        return durationMs;
     }
 
     public void stop() {
@@ -338,6 +412,11 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         playbackStartNs = 0;
         framesShown = 0;
         lastUploadLogNs = 0;
+
+        displayFrozen = false;
+        displayFrozenPosMs = 0;
+        displayStartPosMs = 0;
+        displayWallStartNs = 0;
     }
 
     // ===== FrameSink: эти методы могут вызываться ИЗ ДЕКОДЕР-ПОТОКА =====
@@ -348,8 +427,18 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     }
 
     @Override
+    public void onDuration(long durationMs) {
+        this.durationMs = Math.max(0L, durationMs);
+    }
+
+    @Override
     public void onFrame(int[] abgr, int w, int h, long timestampUs) {
         if (abgr == null) return;
+
+        if (!CollinsClientConfig.get().renderVideo) {
+            freeBuffers.offer(abgr);
+            return;
+        }
         
         // Ограничиваем размер очереди чтобы не съесть всю память
         if (frameQueueSize.get() >= MAX_BUFFER_FRAMES) {
@@ -370,6 +459,9 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     @Override
     public void onPlaybackClockStart(long wallStartNs) {
         this.playbackStartNs = wallStartNs;
+        this.displayWallStartNs = wallStartNs;
+        this.displayFrozen = false;
+        this.displayStartPosMs = this.displayFrozenPosMs;
     }
 
     @Override
@@ -392,6 +484,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     @Override
     public boolean isBufferReady() {
         // Буфер готов когда буферизация закончена
+        if (!CollinsClientConfig.get().renderVideo) return true;
         return !buffering;
     }
 

@@ -12,6 +12,7 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
+import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
 
 public final class VideoScreenRenderer {
@@ -38,6 +39,12 @@ public final class VideoScreenRenderer {
         matrices.translate(-cam.x, -cam.y, -cam.z);
 
         MatrixStack.Entry entry = matrices.peek();
+
+        if (!CollinsClientConfig.get().renderVideo) {
+            matrices.pop();
+            consumers.draw();
+            return;
+        }
 
         for (VideoScreen screen : VideoScreenManager.all()) {
             screen.renderPlayback();

@@ -13,11 +13,19 @@ import java.util.concurrent.locks.LockSupport;
 
 public final class VideoPlayer {
 
+    static {
+        try {
+            avutil.av_log_set_level(avutil.AV_LOG_QUIET);
+        } catch (Throwable ignored) {
+        }
+    }
+
     public interface FrameSink {
         void initVideo(int videoW, int videoH, int targetW, int targetH, double fps);
         void onFrame(int[] argb, int w, int h, long timestampUs);
         void onStop();
         default void onPlaybackClockStart(long wallStartNs) {}
+        default void onDuration(long durationMs) {}
         /** true если буфер ещё не полон (декодер может продолжать) */
         default boolean canAcceptFrame() { return true; }
         /** Получить свободный буфер из пула (или null если пул пуст) */
@@ -38,7 +46,7 @@ public final class VideoPlayer {
     private volatile VideoAudioPlayer currentAudio;
     private volatile long startRequestEpochMs = 0;
 
-    private record CachedMeta(String resolvedUrl, int videoW, int videoH, double fps, long cachedAtMs) {}
+    private record CachedMeta(String resolvedUrl, int videoW, int videoH, double fps, long durationMs, long cachedAtMs) {}
     private static final ConcurrentHashMap<String, CachedMeta> META_CACHE = new ConcurrentHashMap<>();
     private static final long META_TTL_MS = 15L * 60L * 1000L;
 
@@ -108,6 +116,7 @@ public final class VideoPlayer {
         int videoW;
         int videoH;
         double fps;
+        long durationMs;
 
         CachedMeta cached = META_CACHE.get(originalUrl);
         if (cached != null && (System.currentTimeMillis() - cached.cachedAtMs()) <= META_TTL_MS) {
@@ -115,6 +124,7 @@ public final class VideoPlayer {
             videoW = cached.videoW();
             videoH = cached.videoH();
             fps = cached.fps();
+            durationMs = cached.durationMs();
         } else {
             String resolved = tryResolveUrl(url);
             if (resolved != null) url = resolved;
@@ -125,18 +135,18 @@ public final class VideoPlayer {
                 videoW = meta.getImageWidth();
                 videoH = meta.getImageHeight();
                 fps = meta.getVideoFrameRate();
+                long lenUs = meta.getLengthInTime();
+                durationMs = lenUs > 0 ? (lenUs / 1000L) : 0L;
                 meta.stop();
             } catch (Exception e) {
-                System.out.println("[Collins] FFmpeg meta failed: " + e.getMessage());
                 return;
             }
 
             if (fps <= 0) fps = 30.0;
-            META_CACHE.put(originalUrl, new CachedMeta(url, videoW, videoH, fps, System.currentTimeMillis()));
+            META_CACHE.put(originalUrl, new CachedMeta(url, videoW, videoH, fps, durationMs, System.currentTimeMillis()));
         }
 
         if (videoW <= 0 || videoH <= 0) {
-            System.out.println("[Collins] Video has invalid size: " + videoW + "x" + videoH);
             return;
         }
 
@@ -159,7 +169,6 @@ public final class VideoPlayer {
                 try {
                     grabber.setTimestamp(seekTargetUs);
                 } catch (Exception e) {
-                    System.out.println("[Collins] seek failed: " + e.getMessage());
                 }
 
                 try {
@@ -205,6 +214,7 @@ public final class VideoPlayer {
             
             // инициализируем видео
             sink.initVideo(videoW, videoH, target.w(), target.h(), fps);
+            sink.onDuration(durationMs);
 
             // кэш для BGR24 данных (не буфер кадров - те теперь в VideoScreen)
             final int pixels = target.w() * target.h();
@@ -251,7 +261,6 @@ public final class VideoPlayer {
                             wallStarted = true;
                             wallStartNs = System.nanoTime();
                             sink.onPlaybackClockStart(wallStartNs);
-                            System.out.println("[Collins] Audio+Video sync start, buffer ready");
                         }
 
                         if (!audio.isStarted()) audio.startPlayback();
@@ -323,7 +332,6 @@ public final class VideoPlayer {
 
                     if (convertEnd - lastDecodeLogNs >= DECODE_LOG_INTERVAL_NS) {
                         lastDecodeLogNs = convertEnd;
-                        System.out.println("[Collins] decode peak: grab=" + maxGrabUs + "us convert=" + maxConvertUs + "us");
                         maxGrabUs = 0;
                         maxConvertUs = 0;
                     }
@@ -333,22 +341,17 @@ public final class VideoPlayer {
                 }
 
             } catch (LineUnavailableException e) {
-                System.out.println("[Collins] Audio init failed: " + e.getMessage());
             } finally {
                 currentAudio = null;
                 try { grabber.stop(); } catch (Exception ignored) {}
-                System.out.println("[Collins] Decoder ended (running=" + running + ") url=" + url);
             }
 
         } catch (Exception e) {
-            System.out.println("[Collins] FFmpeg decode failed: " + e.getMessage());
         }
     }
 
     private static void applyNetOptions(FFmpegFrameGrabber g) {
-        // эти опции особенно важны для ссылок с редиректами/плавающей скоростью (drive/usercontent и т.п.)
         try {
-            // reconnect
             g.setOption("reconnect", "1");
             g.setOption("reconnect_streamed", "1");
             g.setOption("reconnect_delay_max", "2");
@@ -360,10 +363,10 @@ public final class VideoPlayer {
             g.setOption("probesize", "2000000");
             g.setOption("analyzeduration", "2000000");
 
-            // user-agent (многие хосты хуже отвечают на дефолтный ffmpeg UA)
+            // user-agent
             g.setOption("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 
-            // keep probing minimal (some hosts need this)
+            // keep probing minimal
             g.setOption("fflags", "nobuffer");
         } catch (Exception ignored) {
         }

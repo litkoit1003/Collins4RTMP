@@ -14,6 +14,8 @@ public final class CollinsNet {
 
     private CollinsNet() {}
 
+    private static final boolean DEBUG = false;
+
     public static final int MAX_PACKET_BYTES = 5_000_000;
 
     public static final Map<String, ScreenState> SCREENS = new ConcurrentHashMap<>();
@@ -27,7 +29,7 @@ public final class CollinsNet {
     public static volatile long CLIENT_RECV_MS = 0;
 
     public static void initClientReceiver() {
-        System.out.println("[Collins] Client init: registering receiver collins:main");
+        if (DEBUG) System.out.println("[Collins] Client init: registering receiver collins:main");
 
         ClientPlayNetworking.registerGlobalReceiver(CollinsMainS2CPayload.ID, (payload, context) -> {
             byte[] bytes = payload.data();
@@ -36,7 +38,7 @@ public final class CollinsNet {
                 try {
                     parseWrapped(bytes);
                 } catch (Exception e) {
-                    System.out.println("[Collins] Failed to parse packet: " + e.getMessage());
+                    if (DEBUG) System.out.println("[Collins] Failed to parse packet: " + e.getMessage());
                 }
             });
         });
@@ -56,13 +58,13 @@ public final class CollinsNet {
 
             int len = in.readInt();
             if (len < 0 || len > MAX_PACKET_BYTES) {
-                System.out.println("[Collins] Bad len=" + len);
+                if (DEBUG) System.out.println("[Collins] Bad len=" + len);
                 return;
             }
 
             int available = in.available();
             if (available < len) {
-                System.out.println("[Collins] Not enough bytes. need=" + len + " avail=" + available);
+                if (DEBUG) System.out.println("[Collins] Not enough bytes. need=" + len + " avail=" + available);
                 return;
             }
 
@@ -79,7 +81,7 @@ public final class CollinsNet {
             int version = in.readInt();
 
             if (msg != 1) {
-                System.out.println("[Collins] Unsupported msg=" + msg + " ver=" + version);
+                if (DEBUG) System.out.println("[Collins] Unsupported msg=" + msg + " ver=" + version);
                 return;
             }
 
@@ -87,7 +89,7 @@ public final class CollinsNet {
                 // v1: только экраны, без таймера и глобальных настроек
                 int count = in.readInt();
                 if (count < 0 || count > 10_000) {
-                    System.out.println("[Collins] Bad screen count=" + count);
+                    if (DEBUG) System.out.println("[Collins] Bad screen count=" + count);
                     return;
                 }
 
@@ -126,12 +128,12 @@ public final class CollinsNet {
                 }
 
                 org.sawiq.collins.fabric.client.video.VideoScreenManager.applySync(SCREENS);
-                System.out.println("[Collins] SYNC v1 received: " + count + " screens");
+                if (DEBUG) System.out.println("[Collins] SYNC v1 received: " + count + " screens");
                 return;
             }
 
             if (version != 2) {
-                System.out.println("[Collins] Unsupported msg=" + msg + " ver=" + version);
+                if (DEBUG) System.out.println("[Collins] Unsupported msg=" + msg + " ver=" + version);
                 return;
             }
 
@@ -143,7 +145,7 @@ public final class CollinsNet {
 
             int count = in.readInt();
             if (count < 0 || count > 10_000) {
-                System.out.println("[Collins] Bad screen count=" + count);
+                if (DEBUG) System.out.println("[Collins] Bad screen count=" + count);
                 return;
             }
 
@@ -180,7 +182,7 @@ public final class CollinsNet {
             }
 
             org.sawiq.collins.fabric.client.video.VideoScreenManager.applySync(SCREENS);
-            System.out.println("[Collins] SYNC v2 received: " + count + " screens");
+            if (DEBUG) System.out.println("[Collins] SYNC v2 received: " + count + " screens");
         }
     }
 }

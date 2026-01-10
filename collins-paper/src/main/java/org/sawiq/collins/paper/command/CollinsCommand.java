@@ -286,6 +286,76 @@ public final class CollinsCommand implements TabExecutor {
                 return true;
             }
 
+            case "seek" -> {
+                if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins seek <screen> <seconds>")); return true; }
+                String name = args[1];
+
+                Screen s = store.get(name);
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                double seconds;
+                try { seconds = Double.parseDouble(args[2]); }
+                catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
+
+                long deltaMs = (long) Math.floor(seconds * 1000.0);
+                long now = System.currentTimeMillis();
+
+                CollinsRuntimeState.Playback pb = runtime.get(s.name());
+                long curMs = pb.basePosMs;
+                if (s.playing() && pb.startEpochMs > 0) {
+                    curMs += Math.max(0L, now - pb.startEpochMs);
+                }
+
+                long nextMs = Math.max(0L, curMs + deltaMs);
+                pb.basePosMs = nextMs;
+                pb.startEpochMs = s.playing() ? now : 0L;
+
+                messenger.broadcastSync();
+
+                lang.send(p, "cmd.seeked", lang.vars(
+                        "name", s.name(),
+                        "from", formatMs(curMs),
+                        "to", formatMs(nextMs),
+                        "pos", formatMs(nextMs)
+                ));
+                return true;
+            }
+
+            case "back" -> {
+                if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins back <screen> <seconds>")); return true; }
+                String name = args[1];
+
+                Screen s = store.get(name);
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                double seconds;
+                try { seconds = Double.parseDouble(args[2]); }
+                catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
+
+                long deltaMs = -(long) Math.floor(Math.abs(seconds) * 1000.0);
+                long now = System.currentTimeMillis();
+
+                CollinsRuntimeState.Playback pb = runtime.get(s.name());
+                long curMs = pb.basePosMs;
+                if (s.playing() && pb.startEpochMs > 0) {
+                    curMs += Math.max(0L, now - pb.startEpochMs);
+                }
+
+                long nextMs = Math.max(0L, curMs + deltaMs);
+                pb.basePosMs = nextMs;
+                pb.startEpochMs = s.playing() ? now : 0L;
+
+                messenger.broadcastSync();
+
+                lang.send(p, "cmd.seeked", lang.vars(
+                        "name", s.name(),
+                        "from", formatMs(curMs),
+                        "to", formatMs(nextMs),
+                        "pos", formatMs(nextMs)
+                ));
+                return true;
+            }
+
             case "volume" -> {
                 if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins volume set <0..2> | reset")); return true; }
 
@@ -386,6 +456,7 @@ public final class CollinsCommand implements TabExecutor {
             return startsWith(args[0], List.of(
                     "pos1", "pos2", "create", "seturl",
                     "play", "stop", "pause", "resume",
+                    "seek", "back",
                     "volume", "radius",
                     "remove", "list"
             ));
@@ -393,7 +464,7 @@ public final class CollinsCommand implements TabExecutor {
 
         if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("seturl") || sub.equals("play") || sub.equals("stop") || sub.equals("pause") || sub.equals("resume") || sub.equals("remove")) {
+            if (sub.equals("seturl") || sub.equals("play") || sub.equals("stop") || sub.equals("pause") || sub.equals("resume") || sub.equals("remove") || sub.equals("seek") || sub.equals("back")) {
                 List<String> names = new ArrayList<>();
                 for (Screen s : store.all()) names.add(s.name());
                 return startsWith(args[1], names);
@@ -404,6 +475,23 @@ public final class CollinsCommand implements TabExecutor {
         }
 
         return List.of();
+    }
+
+    private String formatMs(long ms) {
+        if (ms < 0) ms = 0;
+        long totalSeconds = ms / 1000L;
+        long seconds = totalSeconds % 60;
+        long minutes = (totalSeconds / 60) % 60;
+        long hours = totalSeconds / 3600;
+
+        if (hours > 0) {
+            return hours + ":" + pad2(minutes) + ":" + pad2(seconds);
+        }
+        return minutes + ":" + pad2(seconds);
+    }
+
+    private String pad2(long v) {
+        return v < 10 ? ("0" + v) : Long.toString(v);
     }
 
     private List<String> startsWith(String token, List<String> options) {
