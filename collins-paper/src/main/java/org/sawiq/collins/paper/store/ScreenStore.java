@@ -7,7 +7,9 @@ import org.sawiq.collins.paper.model.Screen;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class ScreenStore {
@@ -83,7 +85,7 @@ public final class ScreenStore {
 
         YamlConfiguration cfg = new YamlConfiguration();
         for (Screen s : all()) {
-            String key = s.name().toLowerCase();
+            String key = safeKey(s.name());
             String path = "screens." + key + ".";
             cfg.set(path + "name", s.name());
             cfg.set(path + "world", s.world());
@@ -105,5 +107,11 @@ public final class ScreenStore {
         } catch (IOException e) {
             plugin.getLogger().warning("Failed to save screens.yml: " + e.getMessage());
         }
+    }
+
+    private String safeKey(String screenName) {
+        String n = screenName == null ? "" : screenName.trim().toLowerCase(Locale.ROOT);
+        if (n.isEmpty()) n = "screen";
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(n.getBytes(StandardCharsets.UTF_8));
     }
 }

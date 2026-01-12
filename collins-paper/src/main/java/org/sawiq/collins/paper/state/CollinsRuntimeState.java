@@ -8,8 +8,8 @@ public final class CollinsRuntimeState {
     public volatile int hearRadius = 100;
 
     public static final class Playback {
-        public long startEpochMs = 0; // когда “пошло”
-        public long basePosMs = 0;    // накопленная позиция (для resume)
+        public volatile long startEpochMs = 0; // когда “пошло”
+        public volatile long basePosMs = 0;    // накопленная позиция (для resume)
     }
 
     private final Map<String, Playback> playback = new ConcurrentHashMap<>();

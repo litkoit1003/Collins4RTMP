@@ -13,9 +13,15 @@ import org.sawiq.collins.paper.store.ScreenStore;
 import org.sawiq.collins.paper.util.Lang;
 import org.sawiq.collins.paper.util.ScreenFactory;
 
+import java.net.InetAddress;
+import java.net.URI;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.*;
 
 public final class CollinsCommand implements TabExecutor {
+
+    private static final Pattern SCREEN_NAME_RE = Pattern.compile("^[a-zA-Z0-9_-]{1,32}$");
 
     private final JavaPlugin plugin;
     private final ScreenStore store;
@@ -23,6 +29,8 @@ public final class CollinsCommand implements TabExecutor {
     private final SelectionService selection;
     private final CollinsRuntimeState runtime;
     private final Lang lang;
+
+    private final Map<UUID, Long> lastCommandAtMs = new ConcurrentHashMap<>();
 
     public CollinsCommand(JavaPlugin plugin,
                           ScreenStore store,
@@ -45,6 +53,18 @@ public final class CollinsCommand implements TabExecutor {
         if (!p.hasPermission("collins.admin")) {
             lang.send(p, "error.no_permission");
             return true;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        int rateLimitMs = cfgInt("security.commandRateLimitMs", 250);
+        if (rateLimitMs > 0) {
+            long last = lastCommandAtMs.getOrDefault(p.getUniqueId(), 0L);
+            long since = nowMs - last;
+            if (since >= 0 && since < rateLimitMs) {
+                lang.send(p, "error.rate_limited", lang.vars("ms", (rateLimitMs - since)));
+                return true;
+            }
+            lastCommandAtMs.put(p.getUniqueId(), nowMs);
         }
 
         if (args.length == 0) {
@@ -93,6 +113,11 @@ public final class CollinsCommand implements TabExecutor {
                 if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins create <name>")); return true; }
                 String name = args[1];
 
+                if (!isValidScreenName(name)) {
+                    lang.send(p, "error.invalid_screen_name", lang.vars("name", name));
+                    return true;
+                }
+
                 var sel = selection.get(p);
                 if (!sel.complete()) {
                     lang.send(p, "error.selection_not_complete");
@@ -114,10 +139,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 runtime.resetPlayback(screen.name()); // чтобы новый экран не унаследовал таймер
 
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.screen.created", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " created screen '" + name + "'");
                 return true;
             }
 
@@ -127,6 +153,13 @@ public final class CollinsCommand implements TabExecutor {
                 String name = args[1];
                 String url = args[2];
 
+                String safeUrl = validateAndNormalizeUrl(url);
+                if (safeUrl == null) {
+                    lang.send(p, "error.invalid_url");
+                    plugin.getLogger().info(p.getName() + " rejected URL for screen '" + name + "'");
+                    return true;
+                }
+
                 Screen s = store.get(name);
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
@@ -135,7 +168,7 @@ public final class CollinsCommand implements TabExecutor {
                         s.x1(), s.y1(), s.z1(),
                         s.x2(), s.y2(), s.z2(),
                         s.axis(),
-                        url,
+                        safeUrl,
                         s.playing(),
                         s.loop(),
                         s.volume()
@@ -152,10 +185,11 @@ public final class CollinsCommand implements TabExecutor {
                 store.put(updated);
                 store.save();
 
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.url.set", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " seturl for screen '" + name + "'");
                 return true;
             }
 
@@ -184,10 +218,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.put(updated);
                 store.save();
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.playing", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " play '" + name + "'");
                 return true;
             }
 
@@ -214,10 +249,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.put(updated);
                 store.save();
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.stopped", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " stop '" + name + "'");
                 return true;
             }
 
@@ -249,10 +285,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.put(updated);
                 store.save();
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.paused", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " pause '" + name + "'");
                 return true;
             }
 
@@ -279,10 +316,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.put(updated);
                 store.save();
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.resumed", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " resume '" + name + "'");
                 return true;
             }
 
@@ -297,7 +335,15 @@ public final class CollinsCommand implements TabExecutor {
                 try { seconds = Double.parseDouble(args[2]); }
                 catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
 
-                long deltaMs = (long) Math.floor(seconds * 1000.0);
+                long maxSeekSeconds = cfgLong("security.maxSeekSeconds", 3600L);
+                if (!Double.isFinite(seconds) || Math.abs(seconds) > (double) maxSeekSeconds) {
+                    lang.send(p, "error.seek_too_large", lang.vars("max", maxSeekSeconds));
+                    return true;
+                }
+
+                long maxDeltaMs = Math.max(0L, maxSeekSeconds) * 1000L;
+                long rawDeltaMs = (long) Math.floor(seconds * 1000.0);
+                long deltaMs = clamp(rawDeltaMs, -maxDeltaMs, maxDeltaMs);
                 long now = System.currentTimeMillis();
 
                 CollinsRuntimeState.Playback pb = runtime.get(s.name());
@@ -310,7 +356,7 @@ public final class CollinsCommand implements TabExecutor {
                 pb.basePosMs = nextMs;
                 pb.startEpochMs = s.playing() ? now : 0L;
 
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
 
                 lang.send(p, "cmd.seeked", lang.vars(
                         "name", s.name(),
@@ -318,6 +364,7 @@ public final class CollinsCommand implements TabExecutor {
                         "to", formatMs(nextMs),
                         "pos", formatMs(nextMs)
                 ));
+                plugin.getLogger().info(p.getName() + " seek '" + name + "' " + seconds + "s");
                 return true;
             }
 
@@ -332,7 +379,15 @@ public final class CollinsCommand implements TabExecutor {
                 try { seconds = Double.parseDouble(args[2]); }
                 catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
 
-                long deltaMs = -(long) Math.floor(Math.abs(seconds) * 1000.0);
+                long maxSeekSeconds = cfgLong("security.maxSeekSeconds", 3600L);
+                if (!Double.isFinite(seconds) || Math.abs(seconds) > (double) maxSeekSeconds) {
+                    lang.send(p, "error.seek_too_large", lang.vars("max", maxSeekSeconds));
+                    return true;
+                }
+
+                long maxDeltaMs = Math.max(0L, maxSeekSeconds) * 1000L;
+                long rawDeltaMs = -(long) Math.floor(Math.abs(seconds) * 1000.0);
+                long deltaMs = clamp(rawDeltaMs, -maxDeltaMs, maxDeltaMs);
                 long now = System.currentTimeMillis();
 
                 CollinsRuntimeState.Playback pb = runtime.get(s.name());
@@ -345,7 +400,7 @@ public final class CollinsCommand implements TabExecutor {
                 pb.basePosMs = nextMs;
                 pb.startEpochMs = s.playing() ? now : 0L;
 
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
 
                 lang.send(p, "cmd.seeked", lang.vars(
                         "name", s.name(),
@@ -353,6 +408,7 @@ public final class CollinsCommand implements TabExecutor {
                         "to", formatMs(nextMs),
                         "pos", formatMs(nextMs)
                 ));
+                plugin.getLogger().info(p.getName() + " back '" + name + "' " + seconds + "s");
                 return true;
             }
 
@@ -362,8 +418,9 @@ public final class CollinsCommand implements TabExecutor {
                 String act = args[1].toLowerCase(Locale.ROOT);
                 if (act.equals("reset")) {
                     runtime.globalVolume = 1.0f;
-                    messenger.broadcastSync();
+                    messenger.requestBroadcastSync();
                     lang.send(p, "cmd.global_volume.reset");
+                    plugin.getLogger().info(p.getName() + " volume reset");
                     return true;
                 }
 
@@ -375,8 +432,9 @@ public final class CollinsCommand implements TabExecutor {
 
                     v = Math.max(0f, Math.min(2f, v));
                     runtime.globalVolume = v;
-                    messenger.broadcastSync();
+                    messenger.requestBroadcastSync();
                     lang.send(p, "cmd.global_volume.set", lang.vars("value", v));
+                    plugin.getLogger().info(p.getName() + " volume set " + v);
                     return true;
                 }
 
@@ -390,8 +448,9 @@ public final class CollinsCommand implements TabExecutor {
                 String act = args[1].toLowerCase(Locale.ROOT);
                 if (act.equals("reset")) {
                     runtime.hearRadius = 100;
-                    messenger.broadcastSync();
+                    messenger.requestBroadcastSync();
                     lang.send(p, "cmd.hear_radius.reset");
+                    plugin.getLogger().info(p.getName() + " radius reset");
                     return true;
                 }
 
@@ -403,8 +462,9 @@ public final class CollinsCommand implements TabExecutor {
 
                     r = Math.max(1, Math.min(512, r));
                     runtime.hearRadius = r;
-                    messenger.broadcastSync();
+                    messenger.requestBroadcastSync();
                     lang.send(p, "cmd.hear_radius.set", lang.vars("value", r));
+                    plugin.getLogger().info(p.getName() + " radius set " + r);
                     return true;
                 }
 
@@ -422,10 +482,11 @@ public final class CollinsCommand implements TabExecutor {
                 store.save();
                 runtime.resetPlayback(removed.name());
 
-                messenger.broadcastSync();
+                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.screen.removed", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " removed screen '" + name + "'");
                 return true;
             }
 
@@ -492,6 +553,109 @@ public final class CollinsCommand implements TabExecutor {
 
     private String pad2(long v) {
         return v < 10 ? ("0" + v) : Long.toString(v);
+    }
+
+    private int cfgInt(String path, int def) {
+        try {
+            return plugin.getConfig().getInt(path, def);
+        } catch (Exception ignored) {
+            return def;
+        }
+    }
+
+    private long cfgLong(String path, long def) {
+        try {
+            return plugin.getConfig().getLong(path, def);
+        } catch (Exception ignored) {
+            return def;
+        }
+    }
+
+    private boolean cfgBool(String path, boolean def) {
+        try {
+            return plugin.getConfig().getBoolean(path, def);
+        } catch (Exception ignored) {
+            return def;
+        }
+    }
+
+    private long clamp(long v, long min, long max) {
+        if (v < min) return min;
+        if (v > max) return max;
+        return v;
+    }
+
+    private boolean isValidScreenName(String name) {
+        if (name == null) return false;
+        return SCREEN_NAME_RE.matcher(name).matches();
+    }
+
+    private String validateAndNormalizeUrl(String raw) {
+        if (raw == null) return null;
+
+        String u = raw.trim();
+        if (u.isEmpty()) return null;
+
+        int maxLen = cfgInt("security.maxUrlLength", 2048);
+        if (maxLen > 0 && u.length() > maxLen) return null;
+
+        if (u.indexOf('\n') >= 0 || u.indexOf('\r') >= 0 || u.indexOf('\0') >= 0) return null;
+
+        final URI uri;
+        try {
+            uri = URI.create(u);
+        } catch (Exception ignored) {
+            return null;
+        }
+
+        String scheme = uri.getScheme();
+        if (scheme == null) return null;
+        scheme = scheme.toLowerCase(Locale.ROOT);
+        if (!(scheme.equals("http") || scheme.equals("https"))) return null;
+
+        if (uri.getRawUserInfo() != null) return null;
+
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) return null;
+        if (host.equalsIgnoreCase("localhost")) return null;
+
+        boolean allowPrivate = cfgBool("security.allowPrivateUrls", false);
+        boolean dnsResolve = cfgBool("security.dnsResolve", false);
+
+        if (!allowPrivate) {
+            InetAddress[] addrs = null;
+
+            boolean looksLikeIp = host.indexOf(':') >= 0 || host.matches("^[0-9.]+$");
+            if (looksLikeIp) {
+                try {
+                    addrs = new InetAddress[] { InetAddress.getByName(host) };
+                } catch (Exception ignored) {
+                    return null;
+                }
+            } else if (dnsResolve) {
+                try {
+                    addrs = InetAddress.getAllByName(host);
+                } catch (Exception ignored) {
+                    return null;
+                }
+            }
+
+            if (addrs != null) {
+                for (InetAddress a : addrs) {
+                    if (a.isAnyLocalAddress()) return null;
+                    if (a.isLoopbackAddress()) return null;
+                    if (a.isLinkLocalAddress()) return null;
+                    if (a.isSiteLocalAddress()) return null;
+                    if (a.isMulticastAddress()) return null;
+                }
+            }
+        }
+
+        try {
+            return uri.toASCIIString();
+        } catch (Exception ignored) {
+            return u;
+        }
     }
 
     private List<String> startsWith(String token, List<String> options) {

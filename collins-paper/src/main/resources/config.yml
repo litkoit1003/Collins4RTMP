@@ -1,1 +1,37 @@
 language: en
+
+# EN: Security settings for /collins admin commands and URLs.
+# RU: Настройки безопасности для админ-команд /collins и URL.
+security:
+
+  # EN: Minimum time between any /collins commands from one player.
+  #     Helps against spam/DoS. Set 0 to disable.
+  # RU: Минимальная пауза между любыми командами /collins от одного игрока.
+  #     Защита от спама/DoS. Поставь 0 чтобы отключить.
+  commandRateLimitMs: 100
+
+  # EN: Maximum URL length that can be saved with /collins seturl.
+  #     Prevents huge strings from being stored.
+  # RU: Максимальная длина URL, который можно сохранить через /collins seturl.
+  #     Защита от слишком больших строк.
+  maxUrlLength: 2048
+
+  # EN: Maximum seek/back value in seconds (absolute value).
+  #     Prevents overflow and extreme jumps.
+  # RU: Максимальная перемотка seek/back в секундах (по модулю).
+  #     Защита от overflow и слишком больших прыжков.
+  maxSeekSeconds: 3600
+
+  # EN: Allow URLs to local/private IPs.
+  #     Keep this false for safety. Turn on only if you trust the URLs.
+  # RU: Разрешать URL на локальные/приватные IP.
+  #     Для безопасности держи false. Включай только если доверяешь URL.
+  allowPrivateUrls: false
+
+  # EN: Resolve DNS and block private/local addresses by resolved IP.
+  #     If true, server may do DNS lookups when /collins seturl is executed.
+  #     Default is false to avoid any lag on the main thread.
+  # RU: Разрешать DNS-резолв и блокировать локальные/приватные адреса по IP.
+  #     Если true, сервер может делать DNS-запросы при /collins seturl.
+  #     По умолчанию false, чтобы не лагало на главном потоке.
+  dnsResolve: false

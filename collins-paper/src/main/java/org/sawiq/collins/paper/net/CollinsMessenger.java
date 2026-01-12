@@ -17,6 +17,8 @@ public final class CollinsMessenger {
     private final ScreenStore store;
     private final CollinsRuntimeState runtime;
 
+    private volatile boolean broadcastScheduled;
+
     public CollinsMessenger(JavaPlugin plugin, ScreenStore store, CollinsRuntimeState runtime) {
         this.plugin = plugin;
         this.store = store;
@@ -36,6 +38,15 @@ public final class CollinsMessenger {
         for (Player p : Bukkit.getOnlinePlayers()) {
             sendSync(p);
         }
+    }
+    public void requestBroadcastSync() {
+        if (broadcastScheduled) return;
+        broadcastScheduled = true;
+
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            broadcastScheduled = false;
+            broadcastSync();
+        });
     }
 
     // WRAP: magic(4) + len(int) + innerBytes
