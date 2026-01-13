@@ -18,7 +18,6 @@ import org.sawiq.collins.fabric.client.state.ScreenState;
 public final class VideoScreenRenderer {
 
     private static final double EPS = 0.01; // насколько “над блоком” рисуем
-    private static final double SIGN = +1.0; // +1 = на положительную сторону оси, -1 = на отрицательную
 
     private VideoScreenRenderer() {}
 
@@ -49,7 +48,7 @@ public final class VideoScreenRenderer {
         for (VideoScreen screen : VideoScreenManager.all()) {
             screen.renderPlayback();
             if (!screen.hasTexture()) continue;
-            drawScreen(entry, consumers, screen.state(), screen.textureId());
+            drawScreen(entry, consumers, cam, screen.state(), screen.textureId());
         }
 
         matrices.pop();
@@ -58,6 +57,7 @@ public final class VideoScreenRenderer {
 
     private static void drawScreen(MatrixStack.Entry entry,
                                    VertexConsumerProvider consumers,
+                                   Vec3d cam,
                                    ScreenState s,
                                    Identifier textureId) {
 
@@ -72,50 +72,57 @@ public final class VideoScreenRenderer {
         int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
 
         if (s.axis() == 0) { // XY, Z фиксирован
-            double z = (maxZ + 1.0) + SIGN * EPS;
+            double zPlane = minZ + 0.5;
+            boolean frontIsNegative = cam.z < zPlane;
+            double z = frontIsNegative ? (minZ - EPS) : ((maxZ + 1.0) + EPS);
 
             double x1 = minX,     y1 = minY;
             double x2 = maxX + 1, y2 = minY;
             double x3 = maxX + 1, y3 = maxY + 1;
             double x4 = minX,     y4 = maxY + 1;
 
-            float nx = 0, ny = 0, nz = (float) SIGN;
+            float nx = 0, ny = 0, nz = (float) (frontIsNegative ? -1.0 : +1.0);
 
-            quadTwoSidedNoMirrorU(vc, entry,
+            quadTwoSidedNoMirrorU(vc, entry, frontIsNegative,
                     x2, y1, z,  x1, y2, z,  x4, y3, z,  x3, y4, z,
                     overlay, light, nx, ny, nz);
 
         } else if (s.axis() == 1) { // XZ, Y фиксирован
-            double y = (maxY + 1.0) + SIGN * EPS;
+            double yPlane = minY + 0.5;
+            boolean frontIsNegative = cam.y < yPlane;
+            double y = frontIsNegative ? (minY - EPS) : ((maxY + 1.0) + EPS);
 
             double x1 = minX,     z1 = minZ;
             double x2 = maxX + 1, z2 = minZ;
             double x3 = maxX + 1, z3 = maxZ + 1;
             double x4 = minX,     z4 = maxZ + 1;
 
-            float nx = 0, ny = (float) SIGN, nz = 0;
+            float nx = 0, ny = (float) (frontIsNegative ? -1.0 : +1.0), nz = 0;
 
-            quadTwoSidedNoMirrorU(vc, entry,
+            quadTwoSidedNoMirrorU(vc, entry, frontIsNegative,
                     x1, y, z1,  x2, y, z2,  x3, y, z3,  x4, y, z4,
                     overlay, light, nx, ny, nz);
 
         } else { // axis == 2, YZ, X фиксирован
-            double x = (maxX + 1.0) + SIGN * EPS;
+            double xPlane = minX + 0.5;
+            boolean frontIsNegative = cam.x < xPlane;
+            double x = frontIsNegative ? (minX - EPS) : ((maxX + 1.0) + EPS);
 
             double y1 = minY,     z1 = minZ;
             double y2 = minY,     z2 = maxZ + 1;
             double y3 = maxY + 1, z3 = maxZ + 1;
             double y4 = maxY + 1, z4 = minZ;
 
-            float nx = (float) SIGN, ny = 0, nz = 0;
+            float nx = (float) (frontIsNegative ? -1.0 : +1.0), ny = 0, nz = 0;
 
-            quadTwoSidedNoMirrorU(vc, entry,
+            quadTwoSidedNoMirrorU(vc, entry, frontIsNegative,
                     x, y1, z1,  x, y2, z2,  x, y3, z3,  x, y4, z4,
                     overlay, light, nx, ny, nz);
         }
     }
 
     private static void quadTwoSidedNoMirrorU(VertexConsumer vc, MatrixStack.Entry e,
+                                              boolean flipUFront,
                                               double x1, double y1, double z1,
                                               double x2, double y2, double z2,
                                               double x3, double y3, double z3,
@@ -123,17 +130,28 @@ public final class VideoScreenRenderer {
                                               int overlay, int light,
                                               float nx, float ny, float nz) {
 
-        // FRONT (0,1)-(1,1)-(1,0)-(0,0)
-        v(vc, e, x1, y1, z1, 0, 1, overlay, light, nx, ny, nz);
-        v(vc, e, x2, y2, z2, 1, 1, overlay, light, nx, ny, nz);
-        v(vc, e, x3, y3, z3, 1, 0, overlay, light, nx, ny, nz);
-        v(vc, e, x4, y4, z4, 0, 0, overlay, light, nx, ny, nz);
+        if (!flipUFront) {
+            v(vc, e, x1, y1, z1, 0, 1, overlay, light, nx, ny, nz);
+            v(vc, e, x2, y2, z2, 1, 1, overlay, light, nx, ny, nz);
+            v(vc, e, x3, y3, z3, 1, 0, overlay, light, nx, ny, nz);
+            v(vc, e, x4, y4, z4, 0, 0, overlay, light, nx, ny, nz);
 
-        // BACK: U -> (1-U), нормаль назад
-        v(vc, e, x1, y1, z1, 1, 1, overlay, light, -nx, -ny, -nz);
-        v(vc, e, x2, y2, z2, 0, 1, overlay, light, -nx, -ny, -nz);
-        v(vc, e, x3, y3, z3, 0, 0, overlay, light, -nx, -ny, -nz);
-        v(vc, e, x4, y4, z4, 1, 0, overlay, light, -nx, -ny, -nz);
+            v(vc, e, x1, y1, z1, 1, 1, overlay, light, -nx, -ny, -nz);
+            v(vc, e, x2, y2, z2, 0, 1, overlay, light, -nx, -ny, -nz);
+            v(vc, e, x3, y3, z3, 0, 0, overlay, light, -nx, -ny, -nz);
+            v(vc, e, x4, y4, z4, 1, 0, overlay, light, -nx, -ny, -nz);
+            return;
+        }
+
+        v(vc, e, x1, y1, z1, 1, 1, overlay, light, nx, ny, nz);
+        v(vc, e, x2, y2, z2, 0, 1, overlay, light, nx, ny, nz);
+        v(vc, e, x3, y3, z3, 0, 0, overlay, light, nx, ny, nz);
+        v(vc, e, x4, y4, z4, 1, 0, overlay, light, nx, ny, nz);
+
+        v(vc, e, x1, y1, z1, 0, 1, overlay, light, -nx, -ny, -nz);
+        v(vc, e, x2, y2, z2, 1, 1, overlay, light, -nx, -ny, -nz);
+        v(vc, e, x3, y3, z3, 1, 0, overlay, light, -nx, -ny, -nz);
+        v(vc, e, x4, y4, z4, 0, 0, overlay, light, -nx, -ny, -nz);
     }
 
     private static void v(VertexConsumer vc,
