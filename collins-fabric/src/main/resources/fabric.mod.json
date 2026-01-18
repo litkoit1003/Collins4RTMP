@@ -10,7 +10,7 @@
     "sources": "https://github.com/imsawiq/collins",
     "issues": "https://github.com/imsawiq/collins/issues"
   },
-  "license": "All-Rights-Reserved",
+  "license": "MIT",
   "environment": "*",
   "entrypoints": {
     "main": ["org.sawiq.collins.fabric.CollinsFabricMod"],
