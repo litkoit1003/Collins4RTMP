@@ -30,3 +30,9 @@ cmd.hear_radius.set: "{prefix} &aРадиус =&f {value}"
 cmd.screen.removed: "{prefix} &eЭкран удалён: &f{name}"
 cmd.screens.header: "{prefix} &7Экраны:" 
 cmd.screens.item: "&8- &f{name} &7url=&f{url} &7playing=&f{playing}"
+
+video.downloading: "{prefix} &eВидео слишком тяжёлое, скачивание..."
+video.download_progress: "{prefix} &7Скачивание: &f{percent}% &7({downloaded}МБ / {total}МБ)"
+video.download_complete: "{prefix} &aСкачивание завершено, запуск..."
+video.session_ended: "{prefix} &7✓ Сеанс окончен"
+

@@ -46,9 +46,11 @@ public final class VideoScreenRenderer {
         }
 
         for (VideoScreen screen : VideoScreenManager.all()) {
+            ScreenState st = screen.state();
+            if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
             screen.renderPlayback();
             if (!screen.hasTexture()) continue;
-            drawScreen(entry, consumers, cam, screen.state(), screen.textureId());
+            drawScreen(entry, consumers, cam, st, screen.textureId());
         }
 
         matrices.pop();

@@ -20,6 +20,9 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     private static final boolean DEBUG = false;
 
+    private static final long OUT_OF_RADIUS_GRACE_MS = 15_000L;
+    private static final long RADIUS_AUDIO_HYSTERESIS_MS = 250L;
+
     private ScreenState state;
 
     private Identifier texId;
@@ -37,6 +40,15 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private float lastGain = -1f;
 
     private volatile long durationMs = 0;
+
+    private volatile boolean ended = false;
+    private volatile String endedUrl = "";
+    private volatile long endedAtMs = 0; // Время окончания для автоскрытия action bar
+
+    private volatile long lastInRadiusAtMs = 0;
+    private volatile boolean pausedByRadius = false;
+    private volatile boolean mutedByRadius = false;
+    private volatile long outOfRadiusSinceMs = 0;
 
     private volatile boolean displayFrozen = false;
     private volatile long displayFrozenPosMs = 0;
@@ -79,6 +91,12 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private long lastTickLogNs = 0;
     private static final long TICK_LOG_INTERVAL_NS = 2_000_000_000L;
 
+    // Состояние скачивания
+    private volatile boolean downloading = false;
+    private volatile int downloadPercent = 0;
+    private volatile long downloadedMb = 0;
+    private volatile long downloadTotalMb = 0;
+
     public VideoScreen(ScreenState state) {
         this.state = state;
     }
@@ -103,8 +121,19 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         long ds = Math.abs(newState.startEpochMs() - old.startEpochMs());
 
         // если сервер сдвинул якоря таймлайна (seek/resume) — перезапускаем декодер
+        // НО не сбрасываем текстуру чтобы не было фиолетового экрана
         if (db > 250L || ds > 250L) {
-            stop();
+            // Сбрасываем только флаг ended чтобы видео могло продолжить
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
+            // Останавливаем плеер но НЕ очищаем текстуру (soft stop)
+            if (player != null) {
+                player.stop();
+            }
+            // Сбрасываем флаги для перезапуска
+            started = false;
+            startedUrl = "";
         }
     }
 
@@ -140,7 +169,36 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
 
         // 2.1) hear radius: вне радиуса полностью отключаем (и видео, и звук)
-        if (!isInHearRadius(playerPos, radiusBlocks)) {
+        boolean inRadius = isInHearRadius(playerPos, radiusBlocks);
+        long nowMs = System.currentTimeMillis();
+
+        if (inRadius) {
+            lastInRadiusAtMs = nowMs;
+            pausedByRadius = false;
+            outOfRadiusSinceMs = 0;
+
+            if (mutedByRadius) {
+                mutedByRadius = false;
+                lastGain = -1f;
+            }
+        } else {
+            pausedByRadius = true;
+
+            if (outOfRadiusSinceMs == 0) outOfRadiusSinceMs = nowMs;
+
+            if (player != null) {
+                if (!mutedByRadius && (nowMs - outOfRadiusSinceMs) >= RADIUS_AUDIO_HYSTERESIS_MS) {
+                    player.setGain(0f);
+                    mutedByRadius = true;
+                }
+            }
+
+            if (started && (nowMs - lastInRadiusAtMs) <= OUT_OF_RADIUS_GRACE_MS) {
+                displayFrozen = true;
+                displayFrozenPosMs = clampToDuration(currentVideoPosMs(serverNowMs));
+                return;
+            }
+
             stop();
             return;
         }
@@ -150,9 +208,28 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
         if (player == null) player = new VideoPlayer(this);
 
+        // Если видео закончилось — просто замораживаем отображение, не очищаем текстуру
+        if (ended && endedUrl.equals(state.url())) {
+            // Только останавливаем декодер, но НЕ вызываем stop() который очищает текстуру
+            if (player != null && player.isRunning()) {
+                player.stop();
+            }
+            // Аудио тоже останавливаем
+            if (player != null) {
+                player.setGain(0f);
+            }
+            displayFrozen = true;
+            displayFrozenPosMs = durationMs > 0 ? durationMs : clampToDuration(posMs);
+            // Не перезапускаем — ждём пока сервер изменит URL или остановит экран
+            return;
+        }
+
         if (!started || !startedUrl.equals(state.url())) {
             started = true;
             startedUrl = state.url();
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
             lastGain = gain;
             displayFrozen = true;
             displayFrozenPosMs = posMs;
@@ -184,6 +261,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     public void renderPlayback() {
         if (!started) return;
         if (!CollinsClientConfig.get().renderVideo) return;
+        if (pausedByRadius) return;
         uploadPendingFrameFast();
     }
 
@@ -206,6 +284,8 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private void applyPendingStop() {
         if (!pendingStop.getAndSet(false)) return;
 
+        boolean preserveEnded = ended && endedUrl.equals(state.url()) && !state.loop();
+
         started = false;
         startedUrl = "";
         lastGain = -1f;
@@ -217,10 +297,21 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         framesShown = 0;
         lastUploadLogNs = 0;
 
-        displayFrozen = false;
-        displayFrozenPosMs = 0;
-        displayStartPosMs = 0;
-        displayWallStartNs = 0;
+        if (!preserveEnded) {
+            displayFrozen = false;
+            displayFrozenPosMs = 0;
+            displayStartPosMs = 0;
+            displayWallStartNs = 0;
+
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
+        }
+
+        lastInRadiusAtMs = 0;
+        pausedByRadius = false;
+        mutedByRadius = false;
+        outOfRadiusSinceMs = 0;
     }
 
     private void applyPendingInit() {
@@ -280,7 +371,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     /**
      * Берём кадр из очереди с пейсингом по fps видео.
-     * Буферизация: ждём пока накопится MIN_BUFFER_FRAMES перед началом показа.
+     * Буферизация: ждём пока накопится минимум кадров перед показом.
      */
     private void uploadPendingFrameFast() {
         if (texture == null) return;
@@ -375,7 +466,8 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private long currentVideoPosMs(long serverNowMs) {
         long base = Math.max(0L, state.basePosMs());
         if (serverNowMs <= 0 || state.startEpochMs() <= 0) return base;
-        return base + Math.max(0L, serverNowMs - state.startEpochMs());
+        long pos = base + Math.max(0L, serverNowMs - state.startEpochMs());
+        return clampToDuration(pos);
     }
 
     public long currentPosMs(long serverNowMs) {
@@ -384,12 +476,12 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     public long currentPosMsForDisplay(long serverNowMs) {
         if (displayFrozen) {
-            return Math.max(0L, displayFrozenPosMs);
+            return clampToDuration(Math.max(0L, displayFrozenPosMs));
         }
         long ws = displayWallStartNs;
         if (ws > 0) {
             long elapsedMs = Math.max(0L, (System.nanoTime() - ws) / 1_000_000L);
-            return Math.max(0L, displayStartPosMs + elapsedMs);
+            return clampToDuration(Math.max(0L, displayStartPosMs + elapsedMs));
         }
         return currentVideoPosMs(serverNowMs);
     }
@@ -417,6 +509,9 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         displayFrozenPosMs = 0;
         displayStartPosMs = 0;
         displayWallStartNs = 0;
+
+        mutedByRadius = false;
+        outOfRadiusSinceMs = 0;
     }
 
     // ===== FrameSink: эти методы могут вызываться ИЗ ДЕКОДЕР-ПОТОКА =====
@@ -428,7 +523,25 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     @Override
     public void onDuration(long durationMs) {
-        this.durationMs = Math.max(0L, durationMs);
+        long d = Math.max(0L, durationMs);
+        // защита от "мусорной" длительности (иногда FFmpeg отдаёт абсурдные значения)
+        long max = 12L * 60L * 60L * 1000L;
+        if (d > max) d = 0L;
+        this.durationMs = d;
+    }
+
+    @Override
+    public void onEnded(long durationMs) {
+        long d = durationMs > 0 ? durationMs : this.durationMs;
+        if (d > 0) this.durationMs = d;
+
+        this.ended = true;
+        this.endedUrl = startedUrl;
+        this.endedAtMs = System.currentTimeMillis();
+
+        this.displayFrozen = true;
+        this.displayFrozenPosMs = this.durationMs;
+        this.displayWallStartNs = 0;
     }
 
     @Override
@@ -454,6 +567,14 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     @Override
     public void onStop() {
         pendingStop.set(true);
+    }
+
+    private long clampToDuration(long posMs) {
+        long d = durationMs;
+        if (d > 0 && !state.loop()) {
+            return Math.min(Math.max(0L, posMs), d);
+        }
+        return Math.max(0L, posMs);
     }
 
     @Override
@@ -487,6 +608,62 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         if (!CollinsClientConfig.get().renderVideo) return true;
         return !buffering;
     }
+
+    @Override
+    public void onDownloadStart(String message) {
+        this.downloading = true;
+        this.downloadPercent = 0;
+        this.downloadedMb = 0;
+        this.downloadTotalMb = 0;
+    }
+
+    @Override
+    public void onDownloadProgress(int percent, long downloadedMb, long totalMb) {
+        this.downloadPercent = percent;
+        this.downloadedMb = downloadedMb;
+        this.downloadTotalMb = totalMb;
+    }
+
+    @Override
+    public void onDownloadComplete() {
+        this.downloading = false;
+    }
+
+    // Геттеры для состояния скачивания (для отображения в HUD)
+    public boolean isDownloading() { return downloading; }
+    public int getDownloadPercent() { return downloadPercent; }
+    public long getDownloadedMb() { return downloadedMb; }
+    public long getDownloadTotalMb() { return downloadTotalMb; }
+
+    // Информация о кэшированном файле (для предложения удаления)
+    private volatile String cachedFilePath = null;
+    private volatile long cachedFileSizeBytes = 0;
+
+    @Override
+    public void onCachedFileUsed(String cachedFilePath, long fileSizeBytes) {
+        this.cachedFilePath = cachedFilePath;
+        this.cachedFileSizeBytes = fileSizeBytes;
+        if (DEBUG) System.out.println("[CollinsScreen] onCachedFileUsed: path=" + cachedFilePath + " size=" + (fileSizeBytes / (1024L * 1024L)) + "MB");
+    }
+
+    public String getCachedFilePath() { return cachedFilePath; }
+    public long getCachedFileSizeMb() { return cachedFileSizeBytes / (1024L * 1024L); }
+    public boolean hasCachedFile() { return cachedFilePath != null && !cachedFilePath.isEmpty(); }
+
+    // Геттер для проверки окончания видео (показывать "Сеанс окончен" в течение 5 секунд)
+    private static final long ENDED_DISPLAY_DURATION_MS = 5000L;
+
+    public boolean isEnded() {
+        if (!ended) return false;
+        // Показываем "Сеанс окончен" только 5 секунд
+        if (endedAtMs > 0 && System.currentTimeMillis() - endedAtMs > ENDED_DISPLAY_DURATION_MS) {
+            return false;
+        }
+        return true;
+    }
+
+    // Возвращает true если видео закончилось (без ограничения по времени)
+    public boolean hasEnded() { return ended; }
 
     public int texW() { return texW; }
     public int texH() { return texH; }
