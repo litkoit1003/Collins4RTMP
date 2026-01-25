@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "collins-fabric",
+  "version": "0.2.0",
+  "name": "collins-fabric",
+  "description": "Client mod for watching videos on in‑game screens. Requires the Collins Paper plugin on the server.",
+  "authors": ["sawiq_", "Zorsh", "EssciZ"],
+  "icon": "assets/collins-fabric/icon.png",
+  "contact": {
+    "sources": "https://github.com/imsawiq/collins",
+    "issues": "https://github.com/imsawiq/collins/issues"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["org.sawiq.collins.fabric.CollinsFabricMod"],
+    "client": ["org.sawiq.collins.fabric.client.CollinsFabricClient"],
+    "modmenu": ["org.sawiq.collins.fabric.client.config.CollinsModMenu"]
+  },
+  "mixins": [
+    "collins-fabric.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.14",
+    "fabric-api": "*",
+    "minecraft": "1.21.10",
+    "modmenu": "*",
+    "cloth-config": "*"
+  }
+}

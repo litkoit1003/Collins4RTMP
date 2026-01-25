@@ -1,0 +1,44 @@
+plugins {
+    id "fabric-loom" version "1.13.1"
+    id "maven-publish"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    maven { url = "https://api.modrinth.com/maven" }
+    maven { url = "https://maven.terraformersmc.com/releases/" }
+}
+
+base {
+    archivesName = project.archives_base_name
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // Java-часть
+    modImplementation(include("org.bytedeco:javacv:1.5.12"))
+    modImplementation(include("org.bytedeco:javacpp:1.5.12"))
+    modImplementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12"))
+
+    // Нативки ТОЛЬКО под Windows x64 (в них лежат jni*.dll, включая jniavutil)
+    modImplementation(include("org.bytedeco:javacpp:1.5.12:windows-x86_64"))
+    modImplementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:windows-x86_64-gpl"))
+
+    modImplementation(include("maven.modrinth:cloth-config:20.0.149+fabric"))
+    modImplementation("maven.modrinth:modmenu:16.0.0")
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    withSourcesJar()
+}
+
+tasks.named("remapJar") {
+    addNestedDependencies = true
+}

@@ -1,0 +1,670 @@
+package org.sawiq.collins.fabric.client.video;
+
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.texture.NativeImage;
+import net.minecraft.client.texture.NativeImageBackedTexture;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Vec3d;
+import org.lwjgl.system.MemoryUtil;
+import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
+import org.sawiq.collins.fabric.client.state.ScreenState;
+import org.sawiq.collins.fabric.mixin.NativeImageAccessor;
+
+import java.nio.IntBuffer;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+public final class VideoScreen implements VideoPlayer.FrameSink {
+
+    private static final boolean DEBUG = false;
+
+    private static final long OUT_OF_RADIUS_GRACE_MS = 15_000L;
+    private static final long RADIUS_AUDIO_HYSTERESIS_MS = 250L;
+
+    private ScreenState state;
+
+    private Identifier texId;
+    private NativeImageBackedTexture texture;
+
+    private VideoPlayer player;
+
+    private int texW, texH;
+
+    private long nativePtr = 0;
+    private IntBuffer nativeDst = null;
+
+    private volatile boolean started = false;
+    private String startedUrl = "";
+    private float lastGain = -1f;
+
+    private volatile long durationMs = 0;
+
+    private volatile boolean ended = false;
+    private volatile String endedUrl = "";
+    private volatile long endedAtMs = 0; // Время окончания для автоскрытия action bar
+
+    private volatile long lastInRadiusAtMs = 0;
+    private volatile boolean pausedByRadius = false;
+    private volatile boolean mutedByRadius = false;
+    private volatile long outOfRadiusSinceMs = 0;
+
+    private volatile boolean displayFrozen = false;
+    private volatile long displayFrozenPosMs = 0;
+    private volatile long displayStartPosMs = 0;
+    private volatile long displayWallStartNs = 0;
+
+    // ===== Очередь кадров для буферизации =====
+    private record InitReq(int videoW, int videoH, int targetW, int targetH, double fps) {}
+    private record FrameData(int[] abgr, int w, int h, long timestampUs) {}
+    // ожидаем ABGR (см. VideoPlayer), timestampUs = позиция кадра в микросекундах
+
+    private final AtomicReference<InitReq> pendingInit = new AtomicReference<>(null);
+    private final ConcurrentLinkedQueue<FrameData> frameQueue = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger frameQueueSize = new AtomicInteger(0);
+    private final AtomicBoolean pendingStop = new AtomicBoolean(false);
+    
+    // пул свободных буферов - буферы возвращаются после показа кадра
+    private final ConcurrentLinkedQueue<int[]> freeBuffers = new ConcurrentLinkedQueue<>();
+    private static final int BUFFER_POOL_SIZE = 60; // должен быть > MAX_BUFFER_FRAMES
+    
+    // буферизация: ждём пока накопится минимум кадров перед показом
+    private static final int MIN_BUFFER_FRAMES = 15; // ~0.5 сек при 30fps
+    private static final int MAX_BUFFER_FRAMES = 45; // ~1.5 сек максимум
+    private volatile boolean buffering = true; // тру пока буферизуем
+    // ====================================================================
+
+    // Пейсинг на render thread
+    private double videoFps = 30.0;
+    private volatile long playbackStartNs = 0; // время начала воспроизведения (из декодера или локальное)
+    private long framesShown = 0;
+    
+    // Диагностика
+    private long lastUploadLogNs = 0;
+    private static final long UPLOAD_LOG_INTERVAL_NS = 2_000_000_000L;
+
+    // Диагностика tick() - ищем источник фризов
+    private long lastTickNs = 0;
+    private long maxTickGapUs = 0;
+    private long maxTickDurationUs = 0;
+    private long lastTickLogNs = 0;
+    private static final long TICK_LOG_INTERVAL_NS = 2_000_000_000L;
+
+    // Состояние скачивания
+    private volatile boolean downloading = false;
+    private volatile int downloadPercent = 0;
+    private volatile long downloadedMb = 0;
+    private volatile long downloadTotalMb = 0;
+
+    public VideoScreen(ScreenState state) {
+        this.state = state;
+    }
+
+    public ScreenState state() { return state; }
+
+    public void updateState(ScreenState newState) {
+        ScreenState old = this.state;
+        this.state = newState;
+
+        if (old == null || newState == null) return;
+
+        if (!started) return;
+        if (!old.playing() || !newState.playing()) return;
+
+        String ou = old.url();
+        String nu = newState.url();
+        if (ou == null || nu == null) return;
+        if (!ou.equals(nu)) return;
+
+        long db = Math.abs(newState.basePosMs() - old.basePosMs());
+        long ds = Math.abs(newState.startEpochMs() - old.startEpochMs());
+
+        // если сервер сдвинул якоря таймлайна (seek/resume) — перезапускаем декодер
+        // НО не сбрасываем текстуру чтобы не было фиолетового экрана
+        if (db > 250L || ds > 250L) {
+            // Сбрасываем только флаг ended чтобы видео могло продолжить
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
+            // Останавливаем плеер но НЕ очищаем текстуру (soft stop)
+            if (player != null) {
+                player.stop();
+            }
+            // Сбрасываем флаги для перезапуска
+            started = false;
+            startedUrl = "";
+        }
+    }
+
+    public boolean hasTexture() { return texture != null && texId != null; }
+
+    public Identifier textureId() { return texId; }
+
+    public void tickPlayback(Vec3d playerPos, int radiusBlocks, float globalVolume, long serverNowMs) {
+        long tickStart = System.nanoTime();
+        
+        // диагностика: время между tick() и время внутри tick()
+        if (lastTickNs > 0) {
+            long gapUs = (tickStart - lastTickNs) / 1000L;
+            if (gapUs > maxTickGapUs) maxTickGapUs = gapUs;
+        }
+        
+        // 1) применяем всё, что пришло из декодера (ТОЛЬКО тут)
+        applyPendingStop();
+        applyPendingInit();
+
+        CollinsClientConfig cfg = CollinsClientConfig.get();
+
+        // 1.1) если в конфиге выключено — полностью останавливаем (и видео, и звук)
+        if (!cfg.renderVideo) {
+            stop();
+            return;
+        }
+
+        // 2) управление воспроизведением
+        if (state.url() == null || state.url().isEmpty() || !state.playing()) {
+            stop();
+            return;
+        }
+
+        // 2.1) hear radius: вне радиуса полностью отключаем (и видео, и звук)
+        boolean inRadius = isInHearRadius(playerPos, radiusBlocks);
+        long nowMs = System.currentTimeMillis();
+
+        if (inRadius) {
+            lastInRadiusAtMs = nowMs;
+            pausedByRadius = false;
+            outOfRadiusSinceMs = 0;
+
+            if (mutedByRadius) {
+                mutedByRadius = false;
+                lastGain = -1f;
+            }
+        } else {
+            pausedByRadius = true;
+
+            if (outOfRadiusSinceMs == 0) outOfRadiusSinceMs = nowMs;
+
+            if (player != null) {
+                if (!mutedByRadius && (nowMs - outOfRadiusSinceMs) >= RADIUS_AUDIO_HYSTERESIS_MS) {
+                    player.setGain(0f);
+                    mutedByRadius = true;
+                }
+            }
+
+            if (started && (nowMs - lastInRadiusAtMs) <= OUT_OF_RADIUS_GRACE_MS) {
+                displayFrozen = true;
+                displayFrozenPosMs = clampToDuration(currentVideoPosMs(serverNowMs));
+                return;
+            }
+
+            stop();
+            return;
+        }
+
+        long posMs = currentVideoPosMs(serverNowMs);
+        float gain = Math.max(0f, globalVolume) * Math.max(0f, state.volume()) * cfg.localVolumeMultiplier();
+
+        if (player == null) player = new VideoPlayer(this);
+
+        // Если видео закончилось — просто замораживаем отображение, не очищаем текстуру
+        if (ended && endedUrl.equals(state.url())) {
+            // Только останавливаем декодер, но НЕ вызываем stop() который очищает текстуру
+            if (player != null && player.isRunning()) {
+                player.stop();
+            }
+            // Аудио тоже останавливаем
+            if (player != null) {
+                player.setGain(0f);
+            }
+            displayFrozen = true;
+            displayFrozenPosMs = durationMs > 0 ? durationMs : clampToDuration(posMs);
+            // Не перезапускаем — ждём пока сервер изменит URL или остановит экран
+            return;
+        }
+
+        if (!started || !startedUrl.equals(state.url())) {
+            started = true;
+            startedUrl = state.url();
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
+            lastGain = gain;
+            displayFrozen = true;
+            displayFrozenPosMs = posMs;
+            displayStartPosMs = posMs;
+            displayWallStartNs = 0;
+            player.start(state.url(), state.blocksW(), state.blocksH(), state.loop(), posMs, gain);
+            return;
+        }
+
+        if (Math.abs(gain - lastGain) > 0.001f) {
+            lastGain = gain;
+            player.setGain(gain);
+        }
+
+        // диагностика: лог пиковых значений tick
+        long tickEnd = System.nanoTime();
+        long durationUs = (tickEnd - tickStart) / 1000L;
+        if (durationUs > maxTickDurationUs) maxTickDurationUs = durationUs;
+        lastTickNs = tickEnd;
+
+        if (tickEnd - lastTickLogNs >= TICK_LOG_INTERVAL_NS) {
+            lastTickLogNs = tickEnd;
+            if (DEBUG) System.out.println("[Collins] tick peak: gap=" + maxTickGapUs + "us duration=" + maxTickDurationUs + "us");
+            maxTickGapUs = 0;
+            maxTickDurationUs = 0;
+        }
+    }
+
+    public void renderPlayback() {
+        if (!started) return;
+        if (!CollinsClientConfig.get().renderVideo) return;
+        if (pausedByRadius) return;
+        uploadPendingFrameFast();
+    }
+
+    private boolean isInHearRadius(Vec3d playerPos, int radiusBlocks) {
+        if (playerPos == null) return false;
+        if (radiusBlocks <= 0) return true;
+
+        double cx = (state.minX() + state.maxX() + 1) * 0.5;
+        double cy = (state.minY() + state.maxY() + 1) * 0.5;
+        double cz = (state.minZ() + state.maxZ() + 1) * 0.5;
+
+        double dx = playerPos.x - cx;
+        double dy = playerPos.y - cy;
+        double dz = playerPos.z - cz;
+
+        double r = (double) radiusBlocks;
+        return (dx * dx + dy * dy + dz * dz) <= (r * r);
+    }
+
+    private void applyPendingStop() {
+        if (!pendingStop.getAndSet(false)) return;
+
+        boolean preserveEnded = ended && endedUrl.equals(state.url()) && !state.loop();
+
+        started = false;
+        startedUrl = "";
+        lastGain = -1f;
+
+        frameQueue.clear();
+        frameQueueSize.set(0);
+        buffering = true;
+        playbackStartNs = 0;
+        framesShown = 0;
+        lastUploadLogNs = 0;
+
+        if (!preserveEnded) {
+            displayFrozen = false;
+            displayFrozenPosMs = 0;
+            displayStartPosMs = 0;
+            displayWallStartNs = 0;
+
+            ended = false;
+            endedUrl = "";
+            endedAtMs = 0;
+        }
+
+        lastInRadiusAtMs = 0;
+        pausedByRadius = false;
+        mutedByRadius = false;
+        outOfRadiusSinceMs = 0;
+    }
+
+    private void applyPendingInit() {
+        InitReq req = pendingInit.getAndSet(null);
+        if (req == null) return;
+
+        this.texW = req.targetW();
+        this.texH = req.targetH();
+        this.videoFps = req.fps();
+
+        if (texId == null) {
+            texId = Identifier.of("collins", "screen/" + state.name().toLowerCase());
+        }
+
+        if (texture != null) {
+            texture.close();
+            texture = null;
+        }
+
+        texture = new NativeImageBackedTexture("collins:" + texId, texW, texH, true);
+        MinecraftClient.getInstance().getTextureManager().registerTexture(texId, texture);
+
+        NativeImage imgForPtr = texture.getImage();
+        if (imgForPtr != null) {
+            nativePtr = ((NativeImageAccessor) (Object) imgForPtr).collins$getPointer();
+            nativeDst = MemoryUtil.memIntBuffer(nativePtr, texW * texH);
+        } else {
+            nativePtr = 0;
+            nativeDst = null;
+        }
+
+        // быстро заливаем цветом (без двойных циклов)
+        NativeImage img = texture.getImage();
+        if (img != null) {
+            img.fillRect(0, 0, texW, texH, 0xFFFF00FF);
+        }
+
+        texture.upload();
+
+        // очередь кадров и сбрасываем пейсинг
+        frameQueue.clear();
+        frameQueueSize.set(0);
+        buffering = true;
+        playbackStartNs = 0;
+        framesShown = 0;
+        lastUploadLogNs = 0;
+        
+        // пул буферов
+        freeBuffers.clear();
+        int pixels = texW * texH;
+        for (int i = 0; i < BUFFER_POOL_SIZE; i++) {
+            freeBuffers.offer(new int[pixels]);
+        }
+
+        if (DEBUG) System.out.println("[Collins] initVideo " + texW + "x" + texH + " fps=" + videoFps + " pool=" + BUFFER_POOL_SIZE + " buffering...");
+    }
+
+    /**
+     * Берём кадр из очереди с пейсингом по fps видео.
+     * Буферизация: ждём пока накопится минимум кадров перед показом.
+     */
+    private void uploadPendingFrameFast() {
+        if (texture == null) return;
+
+        int queueSize = frameQueueSize.get();
+        
+        // Буферизация:
+        if (buffering) {
+            long now = System.nanoTime();
+            if (now - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
+                lastUploadLogNs = now;
+                if (DEBUG) System.out.println("[Collins] buffering... " + queueSize + "/" + MIN_BUFFER_FRAMES + " frames");
+            }
+            if (queueSize < MIN_BUFFER_FRAMES) {
+                return; // ещё буферизуем
+            }
+            buffering = false;
+            if (playbackStartNs == 0) playbackStartNs = System.nanoTime();
+            if (displayWallStartNs == 0) {
+                displayWallStartNs = playbackStartNs;
+                displayStartPosMs = displayFrozenPosMs;
+                displayFrozen = false;
+            }
+            framesShown = 0;
+            if (DEBUG) System.out.println("[Collins] buffering done, queue=" + queueSize + " frames, fps=" + videoFps);
+        }
+
+        if (playbackStartNs == 0) playbackStartNs = System.nanoTime();
+
+        long now = System.nanoTime();
+        long elapsedUs = (now - playbackStartNs) / 1000L;
+
+        FrameData frame = frameQueue.peek();
+        if (frame == null) return;
+
+        FrameData chosen = null;
+        while (true) {
+            FrameData next = frameQueue.peek();
+            if (next == null) break;
+            if (next.timestampUs() > elapsedUs) break;
+
+            chosen = frameQueue.poll();
+            if (chosen == null) break;
+            frameQueueSize.decrementAndGet();
+
+            FrameData peekAfter = frameQueue.peek();
+            if (peekAfter != null && peekAfter.timestampUs() <= elapsedUs) {
+                freeBuffers.offer(chosen.abgr());
+                chosen = null;
+            }
+        }
+
+        if (chosen == null) return;
+        frame = chosen;
+        framesShown++;
+
+        int w = frame.w();
+        int h = frame.h();
+        int[] abgr = frame.abgr();
+        
+        if (w != texW || h != texH) {
+            // Размер не совпадает - возвращаем буфер в пул и пропускаем
+            freeBuffers.offer(abgr);
+            return;
+        }
+
+        IntBuffer dst = nativeDst;
+        if (dst == null) {
+            freeBuffers.offer(abgr);
+            return;
+        }
+        int pixels = texW * texH;
+
+        long copyStart = System.nanoTime();
+        dst.position(0);
+        dst.put(abgr, 0, pixels);
+
+        long uploadStart = System.nanoTime();
+        texture.upload();
+        long end = System.nanoTime();
+        
+        // ВАЖНО: возвращаем буфер в пул после использования
+        freeBuffers.offer(abgr);
+
+        if (end - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
+            lastUploadLogNs = end;
+            long lagUs = elapsedUs - frame.timestampUs();
+            if (DEBUG) System.out.println("[Collins] frame " + framesShown + " ts=" + (frame.timestampUs()/1000) + "ms lag=" + (lagUs/1000) + "ms queue=" + queueSize);
+        }
+    }
+
+    private long currentVideoPosMs(long serverNowMs) {
+        long base = Math.max(0L, state.basePosMs());
+        if (serverNowMs <= 0 || state.startEpochMs() <= 0) return base;
+        long pos = base + Math.max(0L, serverNowMs - state.startEpochMs());
+        return clampToDuration(pos);
+    }
+
+    public long currentPosMs(long serverNowMs) {
+        return currentVideoPosMs(serverNowMs);
+    }
+
+    public long currentPosMsForDisplay(long serverNowMs) {
+        if (displayFrozen) {
+            return clampToDuration(Math.max(0L, displayFrozenPosMs));
+        }
+        long ws = displayWallStartNs;
+        if (ws > 0) {
+            long elapsedMs = Math.max(0L, (System.nanoTime() - ws) / 1_000_000L);
+            return clampToDuration(Math.max(0L, displayStartPosMs + elapsedMs));
+        }
+        return currentVideoPosMs(serverNowMs);
+    }
+
+    public long durationMs() {
+        return durationMs;
+    }
+
+    public void stop() {
+        if (player != null) player.stop();
+
+        started = false;
+        startedUrl = "";
+        lastGain = -1f;
+
+        frameQueue.clear();
+        frameQueueSize.set(0);
+        buffering = true;
+
+        playbackStartNs = 0;
+        framesShown = 0;
+        lastUploadLogNs = 0;
+
+        displayFrozen = false;
+        displayFrozenPosMs = 0;
+        displayStartPosMs = 0;
+        displayWallStartNs = 0;
+
+        mutedByRadius = false;
+        outOfRadiusSinceMs = 0;
+    }
+
+    // ===== FrameSink: эти методы могут вызываться ИЗ ДЕКОДЕР-ПОТОКА =====
+
+    @Override
+    public void initVideo(int videoW, int videoH, int targetW, int targetH, double fps) {
+        pendingInit.set(new InitReq(videoW, videoH, targetW, targetH, fps));
+    }
+
+    @Override
+    public void onDuration(long durationMs) {
+        long d = Math.max(0L, durationMs);
+        // защита от "мусорной" длительности (иногда FFmpeg отдаёт абсурдные значения)
+        long max = 12L * 60L * 60L * 1000L;
+        if (d > max) d = 0L;
+        this.durationMs = d;
+    }
+
+    @Override
+    public void onEnded(long durationMs) {
+        long d = durationMs > 0 ? durationMs : this.durationMs;
+        if (d > 0) this.durationMs = d;
+
+        this.ended = true;
+        this.endedUrl = startedUrl;
+        this.endedAtMs = System.currentTimeMillis();
+
+        this.displayFrozen = true;
+        this.displayFrozenPosMs = this.durationMs;
+        this.displayWallStartNs = 0;
+    }
+
+    @Override
+    public void onFrame(int[] abgr, int w, int h, long timestampUs) {
+        if (abgr == null) return;
+
+        if (!CollinsClientConfig.get().renderVideo) {
+            freeBuffers.offer(abgr);
+            return;
+        }
+        
+        // Ограничиваем размер очереди чтобы не съесть всю память
+        if (frameQueueSize.get() >= MAX_BUFFER_FRAMES) {
+            // Очередь полна - декодер должен ждать
+            freeBuffers.offer(abgr);
+            return;
+        }
+        
+        frameQueue.offer(new FrameData(abgr, w, h, timestampUs));
+        frameQueueSize.incrementAndGet();
+    }
+
+    @Override
+    public void onStop() {
+        pendingStop.set(true);
+    }
+
+    private long clampToDuration(long posMs) {
+        long d = durationMs;
+        if (d > 0 && !state.loop()) {
+            return Math.min(Math.max(0L, posMs), d);
+        }
+        return Math.max(0L, posMs);
+    }
+
+    @Override
+    public void onPlaybackClockStart(long wallStartNs) {
+        this.playbackStartNs = wallStartNs;
+        this.displayWallStartNs = wallStartNs;
+        this.displayFrozen = false;
+        this.displayStartPosMs = this.displayFrozenPosMs;
+    }
+
+    @Override
+    public boolean canAcceptFrame() {
+        return frameQueueSize.get() < MAX_BUFFER_FRAMES;
+    }
+
+    @Override
+    public int[] borrowBuffer() {
+        return freeBuffers.poll();
+    }
+
+    @Override
+    public void returnBuffer(int[] buf) {
+        if (buf != null) {
+            freeBuffers.offer(buf);
+        }
+    }
+
+    @Override
+    public boolean isBufferReady() {
+        // Буфер готов когда буферизация закончена
+        if (!CollinsClientConfig.get().renderVideo) return true;
+        return !buffering;
+    }
+
+    @Override
+    public void onDownloadStart(String message) {
+        this.downloading = true;
+        this.downloadPercent = 0;
+        this.downloadedMb = 0;
+        this.downloadTotalMb = 0;
+    }
+
+    @Override
+    public void onDownloadProgress(int percent, long downloadedMb, long totalMb) {
+        this.downloadPercent = percent;
+        this.downloadedMb = downloadedMb;
+        this.downloadTotalMb = totalMb;
+    }
+
+    @Override
+    public void onDownloadComplete() {
+        this.downloading = false;
+    }
+
+    // Геттеры для состояния скачивания (для отображения в HUD)
+    public boolean isDownloading() { return downloading; }
+    public int getDownloadPercent() { return downloadPercent; }
+    public long getDownloadedMb() { return downloadedMb; }
+    public long getDownloadTotalMb() { return downloadTotalMb; }
+
+    // Информация о кэшированном файле (для предложения удаления)
+    private volatile String cachedFilePath = null;
+    private volatile long cachedFileSizeBytes = 0;
+
+    @Override
+    public void onCachedFileUsed(String cachedFilePath, long fileSizeBytes) {
+        this.cachedFilePath = cachedFilePath;
+        this.cachedFileSizeBytes = fileSizeBytes;
+        if (DEBUG) System.out.println("[CollinsScreen] onCachedFileUsed: path=" + cachedFilePath + " size=" + (fileSizeBytes / (1024L * 1024L)) + "MB");
+    }
+
+    public String getCachedFilePath() { return cachedFilePath; }
+    public long getCachedFileSizeMb() { return cachedFileSizeBytes / (1024L * 1024L); }
+    public boolean hasCachedFile() { return cachedFilePath != null && !cachedFilePath.isEmpty(); }
+
+    // Геттер для проверки окончания видео (показывать "Сеанс окончен" в течение 5 секунд)
+    private static final long ENDED_DISPLAY_DURATION_MS = 5000L;
+
+    public boolean isEnded() {
+        if (!ended) return false;
+        // Показываем "Сеанс окончен" только 5 секунд
+        if (endedAtMs > 0 && System.currentTimeMillis() - endedAtMs > ENDED_DISPLAY_DURATION_MS) {
+            return false;
+        }
+        return true;
+    }
+
+    // Возвращает true если видео закончилось (без ограничения по времени)
+    public boolean hasEnded() { return ended; }
+
+    public int texW() { return texW; }
+    public int texH() { return texH; }
+}

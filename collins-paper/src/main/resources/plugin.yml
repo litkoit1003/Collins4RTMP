@@ -1,0 +1,14 @@
+name: collins-paper
+version: 0.2.0+1.21.10
+main: org.sawiq.collins.paper.CollinsPaperPlugin
+api-version: "1.21"
+
+commands:
+  collins:
+    description: Collins screens manager
+    usage: /collins <pos1|pos2|create|seturl|play|stop|pause|resume|volume|radius|remove|list>
+    aliases: [col]
+
+permissions:
+  collins.admin:
+    default: op

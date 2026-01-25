@@ -1,0 +1,13 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven {
+            url = "https://maven.fabricmc.net/"
+        }
+    }
+}
+
+rootProject.name = "collins"
+
+include("collins-fabric")
+include("collins-paper")
