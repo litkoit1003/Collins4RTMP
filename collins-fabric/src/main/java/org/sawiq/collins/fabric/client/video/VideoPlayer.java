@@ -36,6 +36,15 @@ public final class VideoPlayer {
         return path;
     }
 
+    private static boolean isStreamingUrl(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase(Locale.ROOT);
+        return u.startsWith("rtmp://") ||
+                u.startsWith("rtmps://") ||
+                u.startsWith("rtsp://") ||
+                u.startsWith("rtsps://") ||
+                u.contains(".m3u8"); // HLS
+    }
 
     private static final boolean DEBUG = true;
 
@@ -49,7 +58,8 @@ public final class VideoPlayer {
 
     static {
         try {
-            avutil.av_log_set_level(avutil.AV_LOG_QUIET);
+            avutil.av_log_set_level(avutil.AV_LOG_INFO);
+            org.bytedeco.javacv.FFmpegLogCallback.set();
         } catch (Throwable ignored) {
         }
 
@@ -801,25 +811,31 @@ public final class VideoPlayer {
 
             ProbeResult pr = probeUrl(url);
             if (pr == null) {
-                dbg("playOnce: probeUrl failed for " + url);
-                sink.onDownloadStart("collins.video.downloading");
-                CacheResult cr = ensureCachedToDiskFallback(originalUrl, url, sink, mySessionId, this);
-                if (sessionId != mySessionId || !running) {
-                    dbg("playOnce: session changed during fallback, aborting");
-                    return false;
-                }
-                if (cr != null && cr.path() != null) {
-                    sink.onDownloadComplete();
-                    url = toFFmpegPath(cr.path().toString());
-                    dbg("playOnce: fallback cached path=" + url + " ct=" + cr.contentType());
-                    try {
-                        if (cr.contentType() != null && cr.contentType().toLowerCase(Locale.ROOT).contains("video/mp4")) {
-                            forceMp4Demuxer = true;
-                        }
-                    } catch (Exception ignored) {
-                    }
+                // Для стримов пропускаем кэширование
+                if (isStreamingUrl(url)) {
+                    dbg("playOnce: streaming URL, skipping cache: " + url);
+                    // Продолжаем напрямую с FFmpeg
                 } else {
-                    return false;
+                    dbg("playOnce: probeUrl failed for " + url);
+                    sink.onDownloadStart("collins.video.downloading");
+                    CacheResult cr = ensureCachedToDiskFallback(originalUrl, url, sink, mySessionId, this);
+                    if (sessionId != mySessionId || !running) {
+                        dbg("playOnce: session changed during fallback, aborting");
+                        return false;
+                    }
+                    if (cr != null && cr.path() != null) {
+                        sink.onDownloadComplete();
+                        url = toFFmpegPath(cr.path().toString());
+                        dbg("playOnce: fallback cached path=" + url + " ct=" + cr.contentType());
+                        try {
+                            if (cr.contentType() != null && cr.contentType().toLowerCase(Locale.ROOT).contains("video/mp4")) {
+                                forceMp4Demuxer = true;
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    } else {
+                        return false;
+                    }
                 }
             } else {
                 if (pr.finalUrl != null && !pr.finalUrl.isBlank()) url = pr.finalUrl;
@@ -861,7 +877,9 @@ public final class VideoPlayer {
                     }
                 }
 
-                if (pr.isHttp) {
+                if (isStreamingUrl(url)) {
+                    dbg("playOnce: streaming URL detected, skip caching: " + url);
+                } else if (pr.isHttp) {
                     if (isDropboxDownloadUrl(url)) {
                         // Dropbox direct-download ссылки часто плохо перематываются по сети (нестабильный seek/range).
                         // Кэшируем на диск для стабильной перемотки.
@@ -946,7 +964,7 @@ public final class VideoPlayer {
             }
 
             // Диагностика локального файла перед FFmpeg
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            if (!url.startsWith("http://") && !url.startsWith("https://") && !isStreamingUrl(url)) {
                 try {
                     Path p = Path.of(url);
                     boolean exists = Files.exists(p);
@@ -955,7 +973,6 @@ public final class VideoPlayer {
                     dbg("playOnce: local file check path=" + url + " exists=" + exists + " size=" + size + " readable=" + readable);
 
                     if (exists && size > 0) {
-                        // Читаем первые байты для проверки
                         try (var fis = Files.newInputStream(p)) {
                             byte[] header = new byte[8];
                             int read = fis.read(header);
@@ -986,13 +1003,12 @@ public final class VideoPlayer {
             } catch (Exception e) {
                 dbg("playOnce: FFmpeg meta failed url=" + url + " err=" + e);
                 // Если это локальный файл из кэша — удаляем его, он повреждён
-                if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                if (!url.startsWith("http://") && !url.startsWith("https://") && !isStreamingUrl(url)) {
                     try {
                         Path badFile = Path.of(url);
                         if (Files.exists(badFile)) {
                             dbg("playOnce: deleting corrupted cache file: " + url);
                             Files.deleteIfExists(badFile);
-                            // Удаляем из DISK_CACHE_LAST_FAIL_MS чтобы можно было перезагрузить
                             String hash = sha256Hex(originalUrl.trim());
                             DISK_CACHE_LAST_FAIL_MS.remove(hash);
                         }
@@ -1034,6 +1050,12 @@ public final class VideoPlayer {
 
             long openLagMs = (requestEpochMs > 0) ? Math.max(0L, System.currentTimeMillis() - requestEpochMs) : 0L;
             long effectiveSeekMs = seekMs + openLagMs;
+
+            boolean isLive = (durationMs <= 0 || isStreamingUrl(url));
+            if (isLive) {
+                effectiveSeekMs = 0;
+                dbg("playOnce: live stream detected, seek disabled");
+            }
 
             if (effectiveSeekMs > 0) {
                 long seekTargetUs = effectiveSeekMs * 1000L;
@@ -1086,6 +1108,7 @@ public final class VideoPlayer {
             // инициализируем видео
             sink.initVideo(videoW, videoH, target.w(), target.h(), fps);
             sink.onDuration(durationMs);
+            dbg("playOnce: sink.initVideo called w=" + videoW + " h=" + videoH + " target=" + target.w() + "x" + target.h() + " fps=" + fps);
 
             // кэш для BGR24 данных (не буфер кадров - те теперь в VideoScreen)
             final int pixels = target.w() * target.h();
@@ -1094,6 +1117,11 @@ public final class VideoPlayer {
             boolean hasAnyAudio = false;
             long wallStartNs = 0;
             boolean wallStarted = false;
+
+            int frameCount = 0;
+            int videoFrameCount = 0;
+            int audioFrameCount = 0;
+            long lastDiagnosticNs = System.nanoTime();
 
             try (VideoAudioPlayer audio = new VideoAudioPlayer(sampleRate, channels)) {
                 currentAudio = audio;
@@ -1109,13 +1137,34 @@ public final class VideoPlayer {
 
                 boolean ended = false;
 
+                dbg("playOnce: entering decode loop...");
+
                 while (running) {
                     long grabStart = System.nanoTime();
-                    Frame frame = grabber.grab();
+                    Frame frame = null;
+
+                    try {
+                        frame = grabber.grab();
+                    } catch (Exception e) {
+                        dbg("playOnce: grabber.grab() exception: " + e.getMessage());
+                        e.printStackTrace();
+                        break;
+                    }
+
                     long grabEnd = System.nanoTime();
+
+                    frameCount++;
+
                     if (frame == null) {
+                        dbg("playOnce: frame is null after " + frameCount + " total frames (video=" + videoFrameCount + " audio=" + audioFrameCount + ")");
                         ended = true;
                         break;
+                    }
+
+                    // Диагностика каждые 2 секунды
+                    if (grabEnd - lastDiagnosticNs > 2_000_000_000L) {
+                        dbg("playOnce: decode stats - total=" + frameCount + " video=" + videoFrameCount + " audio=" + audioFrameCount);
+                        lastDiagnosticNs = grabEnd;
                     }
 
                     long tsUsForPace = frame.timestamp;
@@ -1123,9 +1172,11 @@ public final class VideoPlayer {
 
                     if (tsUsForPace > 0 && baseStreamTsUs == Long.MIN_VALUE) {
                         baseStreamTsUs = tsUsForPace;
+                        dbg("playOnce: base stream timestamp set to " + baseStreamTsUs + " us");
                     }
 
                     if (frame.samples != null) {
+                        audioFrameCount++;
                         hasAnyAudio = true;
 
                         if (!sink.isBufferReady()) {
@@ -1137,31 +1188,44 @@ public final class VideoPlayer {
                             wallStarted = true;
                             wallStartNs = System.nanoTime();
                             sink.onPlaybackClockStart(wallStartNs);
+                            dbg("playOnce: audio playback clock started");
                         }
 
-                        if (!audio.isStarted()) audio.startPlayback();
+                        if (!audio.isStarted()) {
+                            audio.startPlayback();
+                            dbg("playOnce: audio playback started");
+                        }
                         if (audio.hasPrebuffer()) audio.flushPrebuffer();
                         audio.writeSamples(frame.samples, channels);
                         continue;
                     }
 
-                    if (frame.image == null || frame.image.length == 0) continue;
+                    if (frame.image == null || frame.image.length == 0) {
+                        dbg("playOnce: frame has no image data (frame.image is " + (frame.image == null ? "null" : "empty") + ")");
+                        continue;
+                    }
 
+                    videoFrameCount++;
                     videoFrameIndex++;
+
+                    if (videoFrameCount == 1) {
+                        dbg("playOnce: FIRST VIDEO FRAME RECEIVED! frame.image.length=" + frame.image.length + " imageWidth=" + frame.imageWidth + " imageHeight=" + frame.imageHeight);
+                    }
 
                     if (!hasAnyAudio) {
                         // без аудио: декодер бежит пока буфер не полон
-                        // пейсинг делается на render thread
                         while (running && !sink.canAcceptFrame()) {
-                            // буфер полон - ждём пока render thread освободит место
                             LockSupport.parkNanos(1_000_000L); // 1ms
-                            if (Thread.interrupted()) return false;
+                            if (Thread.interrupted()) {
+                                dbg("playOnce: interrupted while waiting for buffer space");
+                                return false;
+                            }
                         }
                     }
 
-                    long convertStart = System.nanoTime(); // ПОСЛЕ пейсинга
+                    long convertStart = System.nanoTime();
 
-                    // получаем буфер из пула (управляется VideoScreen)
+                    // получаем буфер из пула
                     int[] out = sink.borrowBuffer();
                     if (out == null) {
                         // пул пуст - ждём
@@ -1174,21 +1238,31 @@ public final class VideoPlayer {
 
                     // прямое чтение из ByteBuffer (BGR24 формат)
                     ByteBuffer bb = (ByteBuffer) frame.image[0];
-                    if (bb == null) continue;
+                    if (bb == null) {
+                        dbg("playOnce: frame.image[0] ByteBuffer is null!");
+                        sink.returnBuffer(out); // возвращаем буфер
+                        continue;
+                    }
 
                     int strideBytes = frame.imageStride;
                     int rowBytes = w * 3;
 
                     // читаем напрямую через bulk get в кэшированный byte[]
-                    if (strideBytes <= 0 || strideBytes == rowBytes) {
-                        bb.position(0);
-                        bb.get(tmpBytes, 0, Math.min(tmpBytes.length, bb.remaining()));
-                    } else {
-                        // с учётом stride
-                        for (int y = 0; y < h; y++) {
-                            bb.position(y * strideBytes);
-                            bb.get(tmpBytes, y * rowBytes, Math.min(rowBytes, bb.remaining()));
+                    try {
+                        if (strideBytes <= 0 || strideBytes == rowBytes) {
+                            bb.position(0);
+                            bb.get(tmpBytes, 0, Math.min(tmpBytes.length, bb.remaining()));
+                        } else {
+                            // с учётом stride
+                            for (int y = 0; y < h; y++) {
+                                bb.position(y * strideBytes);
+                                bb.get(tmpBytes, y * rowBytes, Math.min(rowBytes, bb.remaining()));
+                            }
                         }
+                    } catch (Exception e) {
+                        dbg("playOnce: failed to read frame data: " + e.getMessage());
+                        sink.returnBuffer(out);
+                        continue;
                     }
 
                     // BGR24 -> ABGR (0xAABBGGRR)
@@ -1202,35 +1276,49 @@ public final class VideoPlayer {
                     long convertEnd = System.nanoTime();
 
                     long grabUs = (grabEnd - grabStart) / 1000L;
-                    long convertUs = (convertEnd - convertStart) / 1000L; // только конвертация, без пейсинга
+                    long convertUs = (convertEnd - convertStart) / 1000L;
                     if (grabUs > maxGrabUs) maxGrabUs = grabUs;
                     if (convertUs > maxConvertUs) maxConvertUs = convertUs;
 
                     if (convertEnd - lastDecodeLogNs >= DECODE_LOG_INTERVAL_NS) {
+                        dbg("playOnce: performance - maxGrab=" + maxGrabUs + "us maxConvert=" + maxConvertUs + "us");
                         lastDecodeLogNs = convertEnd;
                         maxGrabUs = 0;
                         maxConvertUs = 0;
                     }
 
                     long relativeTs = (baseStreamTsUs != Long.MIN_VALUE && tsUsForPace > 0) ? (tsUsForPace - baseStreamTsUs) : 0;
+
+                    if (videoFrameCount <= 3) {
+                        dbg("playOnce: calling sink.onFrame #" + videoFrameCount + " w=" + w + " h=" + h + " relativeTs=" + relativeTs);
+                    }
+
                     sink.onFrame(out, target.w(), target.h(), relativeTs);
                 }
+
+                dbg("playOnce: decode loop finished - total=" + frameCount + " video=" + videoFrameCount + " audio=" + audioFrameCount + " ended=" + ended);
 
                 if (ended) {
                     sink.onEnded(durationMs);
                 }
 
             } catch (LineUnavailableException e) {
+                dbg("playOnce: LineUnavailableException - " + e.getMessage());
+            } catch (Exception e) {
+                dbg("playOnce: unexpected exception in audio player: " + e.getMessage());
+                e.printStackTrace();
             } finally {
                 currentAudio = null;
                 try {
                     grabber.stop();
+                    dbg("playOnce: grabber stopped");
                 } catch (Exception ignored) {
                 }
             }
 
         } catch (Exception e) {
             dbg("playOnce: FFmpeg decode failed url=" + url + " err=" + e);
+            e.printStackTrace();
             return false;
         }
 
@@ -1238,35 +1326,55 @@ public final class VideoPlayer {
     }
 
     private static void applyNetOptions(FFmpegFrameGrabber g, String url) {
-        // Применяем сетевые опции только для HTTP/HTTPS URL
         boolean isHttp = url != null && (url.startsWith("http://") || url.startsWith("https://"));
+        boolean isRtmp = url != null && (url.toLowerCase().startsWith("rtmp://") || url.toLowerCase().startsWith("rtmps://"));
+        boolean isRtsp = url != null && (url.toLowerCase().startsWith("rtsp://") || url.toLowerCase().startsWith("rtsps://"));
 
         try {
-            // Эти опции безопасны для любых источников
-            g.setOption("probesize", "500000");
-            g.setOption("analyzeduration", "500000");
-            g.setOption("fflags", "nobuffer");
+            if (isRtmp) {
+                // RTMP: минимальные опции (метод 1 из теста работает лучше всего)
+                // НЕ устанавливаем format — JavaCV сам определит FLV
+                // НЕ устанавливаем опции — FFmpeg работает стабильнее без них
 
-            // Сетевые опции только для HTTP
-            if (isHttp) {
+                dbg("applyNetOptions: RTMP detected, using minimal config");
+
+            } else if (isRtsp) {
+                // RTSP опции
+                g.setOption("rtsp_transport", "tcp"); // TCP более стабильный чем UDP
+                g.setOption("fflags", "nobuffer");
+                g.setOption("flags", "low_delay");
+                g.setOption("probesize", "32768");
+                g.setOption("analyzeduration", "1000000");
+
+                dbg("applyNetOptions: RTSP options applied");
+            } else if (isHttp) {
+                // HTTP опции (существующие)
+                g.setOption("probesize", "500000");
+                g.setOption("analyzeduration", "500000");
+                g.setOption("fflags", "nobuffer");
+
                 g.setOption("reconnect", "1");
                 g.setOption("reconnect_streamed", "1");
                 g.setOption("reconnect_delay_max", "2");
                 g.setOption("reconnect_at_eof", "1");
 
-                // timeouts (в микросекундах)
                 g.setOption("rw_timeout", "5000000");
                 g.setOption("timeout", "5000000");
                 g.setOption("stimeout", "5000000");
-
-                // user-agent
                 g.setOption("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 
-                // try to make http seek/Range work when server supports it
                 g.setOption("seekable", "1");
                 g.setOption("multiple_requests", "1");
+
+                dbg("applyNetOptions: HTTP options applied");
+            } else {
+                // Локальные файлы
+                g.setOption("probesize", "500000");
+                g.setOption("analyzeduration", "500000");
+                g.setOption("fflags", "nobuffer");
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            dbg("applyNetOptions: failed to set options: " + e.getMessage());
         }
     }
 

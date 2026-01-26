@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "id": "collins-fabric",
-  "version": "0.2.0",
-  "name": "collins-fabric",
-  "description": "Client mod for watching videos on in‑game screens. Requires the Collins Paper plugin on the server.",
-  "authors": ["sawiq_", "Zorsh", "EssciZ"],
-  "icon": "assets/collins-fabric/icon.png",
+  "id": "collins4rtmp-fabric",
+  "version": "0.2.0+1.21.10",
+  "name": "collins4rtmp-fabric",
+  "description": "Collins with RTMP, RTSP, HLS? support. Based on collins by imsawiq, licensed under MIT.",
+  "authors": ["litkoit1003", "sawiq_", "Zorsh", "EssciZ"],
+  "icon": "assets/collins4rtmp-fabric/icon.png",
   "contact": {
-    "sources": "https://github.com/imsawiq/collins",
-    "issues": "https://github.com/imsawiq/collins/issues"
+    "sources": "https://github.com/litkoit1003/collins4rtmp",
+    "issues": "https://github.com/litkoit1003/collins4rtmp/issues"
   },
   "license": "MIT",
   "environment": "*",

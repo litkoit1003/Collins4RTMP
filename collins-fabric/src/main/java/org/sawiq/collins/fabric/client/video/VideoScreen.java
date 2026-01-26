@@ -11,6 +11,7 @@ import org.sawiq.collins.fabric.client.state.ScreenState;
 import org.sawiq.collins.fabric.mixin.NativeImageAccessor;
 
 import java.nio.IntBuffer;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -70,8 +71,13 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private static final int BUFFER_POOL_SIZE = 60; // должен быть > MAX_BUFFER_FRAMES
     
     // буферизация: ждём пока накопится минимум кадров перед показом
-    private static final int MIN_BUFFER_FRAMES = 15; // ~0.5 сек при 30fps
-    private static final int MAX_BUFFER_FRAMES = 45; // ~1.5 сек максимум
+    private int getMinBufferFrames() {
+        return isLiveStream() ? 5 : 15; // 5 кадров для live (~160мс при 30fps)
+    }
+
+    private int getMaxBufferFrames() {
+        return isLiveStream() ? 20 : 45; // 20 кадров для live (~660мс)
+    }
     private volatile boolean buffering = true; // тру пока буферизуем
     // ====================================================================
 
@@ -96,6 +102,17 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private volatile int downloadPercent = 0;
     private volatile long downloadedMb = 0;
     private volatile long downloadTotalMb = 0;
+
+    public boolean isLiveStream() {
+        String url = state.url();
+        if (url == null) return false;
+        String u = url.toLowerCase(Locale.ROOT);
+        return u.startsWith("rtmp://") ||
+                u.startsWith("rtmps://") ||
+                u.startsWith("rtsp://") ||
+                u.startsWith("rtsps://") ||
+                u.contains(".m3u8");
+    }
 
     public VideoScreen(ScreenState state) {
         this.state = state;
@@ -362,11 +379,17 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         // пул буферов
         freeBuffers.clear();
         int pixels = texW * texH;
-        for (int i = 0; i < BUFFER_POOL_SIZE; i++) {
+        int poolSize = isLiveStream() ? 30 : BUFFER_POOL_SIZE; // 30 для live, 60 для файлов
+        for (int i = 0; i < poolSize; i++) {
             freeBuffers.offer(new int[pixels]);
         }
 
-        if (DEBUG) System.out.println("[Collins] initVideo " + texW + "x" + texH + " fps=" + videoFps + " pool=" + BUFFER_POOL_SIZE + " buffering...");
+        if (DEBUG) {
+            String type = isLiveStream() ? "LIVE STREAM" : "FILE";
+            System.out.println("[Collins] initVideo " + texW + "x" + texH +
+                    " fps=" + videoFps + " pool=" + poolSize +
+                    " type=" + type + " buffering...");
+        }
     }
 
     /**
@@ -380,12 +403,14 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         
         // Буферизация:
         if (buffering) {
+            int minFrames = getMinBufferFrames();
             long now = System.nanoTime();
             if (now - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
                 lastUploadLogNs = now;
-                if (DEBUG) System.out.println("[Collins] buffering... " + queueSize + "/" + MIN_BUFFER_FRAMES + " frames");
+                String type = isLiveStream() ? "LIVE" : "FILE";
+                if (DEBUG) System.out.println("[Collins] buffering " + type + "... " + queueSize + "/" + minFrames + " frames");
             }
-            if (queueSize < MIN_BUFFER_FRAMES) {
+            if (queueSize < minFrames) {
                 return; // ещё буферизуем
             }
             buffering = false;
@@ -554,7 +579,8 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
         
         // Ограничиваем размер очереди чтобы не съесть всю память
-        if (frameQueueSize.get() >= MAX_BUFFER_FRAMES) {
+        int maxFrames = getMaxBufferFrames();
+        if (frameQueueSize.get() >= maxFrames) {
             // Очередь полна - декодер должен ждать
             freeBuffers.offer(abgr);
             return;
@@ -587,7 +613,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     @Override
     public boolean canAcceptFrame() {
-        return frameQueueSize.get() < MAX_BUFFER_FRAMES;
+        return frameQueueSize.get() < getMaxBufferFrames();
     }
 
     @Override

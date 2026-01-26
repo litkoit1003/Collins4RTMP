@@ -12,6 +12,7 @@ error.invalid_screen_name: "{prefix} &cНеверное имя экрана: &f{
 error.invalid_url: "{prefix} &cНеверный или запрещённый URL."
 error.rate_limited: "{prefix} &cСлишком быстро. Повтори через &f{ms}мс&c."
 error.seek_too_large: "{prefix} &cСлишком большая перемотка. Макс: &f{max}с"
+error.cannot_seek_stream: "{prefix} &cНевозможно перемотать live стрим."
 
 cmd.help: "{prefix} &7Команды:\n&8- &f/collins pos1\n&8- &f/collins pos2\n&8- &f/collins create <name>\n&8- &f/collins seturl <screen> <url>\n&8- &f/collins play <screen>\n&8- &f/collins pause <screen>\n&8- &f/collins resume <screen>\n&8- &f/collins stop <screen>\n&8- &f/collins seek <screen> <seconds>\n&8- &f/collins back <screen> <seconds>\n&8- &f/collins volume set <0..2>\n&8- &f/collins volume reset\n&8- &f/collins radius set <1..512>\n&8- &f/collins radius reset\n&8- &f/collins remove <screen>\n&8- &f/collins list"
 cmd.pos1.set: "{prefix} &aPos1 =&f {x} {y} {z}"
@@ -28,11 +29,11 @@ cmd.global_volume.set: "{prefix} &aГлобальная громкость =&f {
 cmd.hear_radius.reset: "{prefix} &eРадиус сброшен на &f100"
 cmd.hear_radius.set: "{prefix} &aРадиус =&f {value}"
 cmd.screen.removed: "{prefix} &eЭкран удалён: &f{name}"
-cmd.screens.header: "{prefix} &7Экраны:" 
+cmd.screens.header: "{prefix} &7Экраны:"
 cmd.screens.item: "&8- &f{name} &7url=&f{url} &7playing=&f{playing}"
 
 video.downloading: "{prefix} &eВидео слишком тяжёлое, скачивание..."
 video.download_progress: "{prefix} &7Скачивание: &f{percent}% &7({downloaded}МБ / {total}МБ)"
 video.download_complete: "{prefix} &aСкачивание завершено, запуск..."
 video.session_ended: "{prefix} &7✓ Сеанс окончен"
-
+video.live_stream: "{prefix} &c🔴 ПРЯМОЙ ЭФИР"

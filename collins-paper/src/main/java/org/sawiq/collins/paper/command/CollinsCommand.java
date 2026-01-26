@@ -212,7 +212,7 @@ public final class CollinsCommand implements TabExecutor {
                         s.axis(),
                         s.mp4Url(),
                         true,
-                        s.loop(),
+                        isStreamingUrl(s.mp4Url()) || s.loop(),
                         s.volume()
                 );
 
@@ -331,6 +331,11 @@ public final class CollinsCommand implements TabExecutor {
                 Screen s = store.get(name);
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
+                if (isStreamingUrl(s.mp4Url())) {
+                    lang.send(p, "error.cannot_seek_stream", lang.vars("name", name));
+                    return true;
+                }
+
                 double seconds;
                 try { seconds = Double.parseDouble(args[2]); }
                 catch (Exception e) { lang.send(p, "error.bad_number"); return true; }
@@ -374,6 +379,11 @@ public final class CollinsCommand implements TabExecutor {
 
                 Screen s = store.get(name);
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                if (isStreamingUrl(s.mp4Url())) {
+                    lang.send(p, "error.cannot_seek_stream", lang.vars("name", name));
+                    return true;
+                }
 
                 double seconds;
                 try { seconds = Double.parseDouble(args[2]); }
@@ -611,13 +621,26 @@ public final class CollinsCommand implements TabExecutor {
         String scheme = uri.getScheme();
         if (scheme == null) return null;
         scheme = scheme.toLowerCase(Locale.ROOT);
-        if (!(scheme.equals("http") || scheme.equals("https"))) return null;
+
+        if (!(scheme.equals("http") || scheme.equals("https") ||
+                scheme.equals("rtmp") || scheme.equals("rtmps") ||
+                scheme.equals("rtsp") || scheme.equals("rtsps"))) {
+            return null;
+        }
 
         if (uri.getRawUserInfo() != null) return null;
 
         String host = uri.getHost();
         if (host == null || host.isBlank()) return null;
         if (host.equalsIgnoreCase("localhost")) return null;
+
+        if (scheme.startsWith("rtmp") || scheme.startsWith("rtsp")) {
+            try {
+                return uri.toASCIIString();
+            } catch (Exception ignored) {
+                return u;
+            }
+        }
 
         boolean allowPrivate = cfgBool("security.allowPrivateUrls", false);
         boolean dnsResolve = cfgBool("security.dnsResolve", false);
@@ -665,5 +688,15 @@ public final class CollinsCommand implements TabExecutor {
             if (o.toLowerCase(Locale.ROOT).startsWith(t)) out.add(o);
         }
         return out;
+    }
+
+    private boolean isStreamingUrl(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase(Locale.ROOT);
+        return u.startsWith("rtmp://") ||
+                u.startsWith("rtmps://") ||
+                u.startsWith("rtsp://") ||
+                u.startsWith("rtsps://") ||
+                u.contains(".m3u8");
     }
 }

@@ -31,7 +31,7 @@ public final class VideoScreenManager {
     private static final int GRAY = 0xAAAAAA;
     private static final int YELLOW = 0xFFFF55;
     private static final int RED = 0xFF5555;
-    private static final Text PREFIX = Text.literal("[Collins-Fabric] ").setStyle(Style.EMPTY.withColor(GREEN));
+    private static final Text PREFIX = Text.literal("[Collins4RTMP-Fabric] ").setStyle(Style.EMPTY.withColor(GREEN));
 
     private static volatile long lastActionbarUpdateMs = 0;
     private static volatile String lastClientWorldKey = "";
@@ -240,32 +240,37 @@ public final class VideoScreenManager {
                     String text = null;
                     int color = GREEN;
 
-                    // Если видео закончилось — показываем предложение удаления в чат (не в action bar)
-                    if (nearest.isEnded()) {
-                        // Показываем предложение удалить кэш (только один раз и только для скачанных видео)
-                        String screenKey = nearest.state().name() + "_" + nearest.state().url();
-                        if (nearest.hasCachedFile() && !SHOWN_DELETE_PROMPT.contains(screenKey)) {
-                            SHOWN_DELETE_PROMPT.add(screenKey);
-                            pendingDeletePath = nearest.getCachedFilePath();
-                            long sizeMb = nearest.getCachedFileSizeMb();
+                    // LIVE стрим - показываем индикатор
+                    if (nearest.isLiveStream() && !nearest.isEnded()) {
+                        text = "🔴 LIVE: " + nearest.state().name();
+                        color = RED;
+                    }
+                    // Если видео закончилось — показываем предложение удаления в чат
+                    else if (nearest.isEnded()) {
+                        // Показываем предложение удалить кэш (только для файлов, не стримов)
+                        if (!nearest.isLiveStream()) {
+                            String screenKey = nearest.state().name() + "_" + nearest.state().url();
+                            if (nearest.hasCachedFile() && !SHOWN_DELETE_PROMPT.contains(screenKey)) {
+                                SHOWN_DELETE_PROMPT.add(screenKey);
+                                pendingDeletePath = nearest.getCachedFilePath();
+                                long sizeMb = nearest.getCachedFileSizeMb();
 
-                            // Сообщение в чат с командами
-                            p.sendMessage(PREFIX.copy()
-                                .append(Text.literal("Сеанс окончен. Видео занимает " + sizeMb + " МБ на диске.\n").setStyle(Style.EMPTY.withColor(GRAY)))
-                                .append(Text.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
-                                .append(Text.literal(" — удалить видео\n").setStyle(Style.EMPTY.withColor(GRAY)))
-                                .append(Text.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
-                                .append(Text.literal(" — открыть папку").setStyle(Style.EMPTY.withColor(GRAY))), false);
+                                p.sendMessage(PREFIX.copy()
+                                        .append(Text.literal("Сеанс окончен. Видео занимает " + sizeMb + " МБ на диске.\n").setStyle(Style.EMPTY.withColor(GRAY)))
+                                        .append(Text.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
+                                        .append(Text.literal(" — удалить видео\n").setStyle(Style.EMPTY.withColor(GRAY)))
+                                        .append(Text.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
+                                        .append(Text.literal(" — открыть папку").setStyle(Style.EMPTY.withColor(GRAY))), false);
+                            }
                         }
-                        // Action bar покажет пустую строку (очистит)
                         text = "";
                     }
-                    // Если видео уже закончилось (hasEnded) но прошло 5 секунд — ничего не показываем
+                    // Если видео уже закончилось (hasEnded) но прошло 5 секунд
                     else if (nearest.hasEnded()) {
                         text = "";
                     }
-                    // Если идёт скачивание — показываем прогресс
-                    else if (nearest.isDownloading()) {
+                    // Если идёт скачивание (только для файлов, не для стримов)
+                    else if (nearest.isDownloading() && !nearest.isLiveStream()) {
                         int pct = nearest.getDownloadPercent();
                         long dlMb = nearest.getDownloadedMb();
                         long totalMb = nearest.getDownloadTotalMb();
@@ -275,8 +280,9 @@ public final class VideoScreenManager {
                             text = "⏬ Скачивание: " + dlMb + "МБ...";
                         }
                         color = YELLOW;
-                    } else {
-                        // Обычный таймлайн
+                    }
+                    // Обычный таймлайн (только для файлов)
+                    else if (!nearest.isLiveStream()) {
                         long posMs = nearest.currentPosMsForDisplay(serverNowMs);
                         long durMs = nearest.durationMs();
 
@@ -289,7 +295,6 @@ public final class VideoScreenManager {
                     if (text != null && !text.isEmpty()) {
                         p.sendMessage(PREFIX.copy().append(Text.literal(text).setStyle(Style.EMPTY.withColor(color))), true);
                     } else if (text != null) {
-                        // Очищаем action bar пустым сообщением
                         p.sendMessage(Text.literal(""), true);
                     }
                 }
