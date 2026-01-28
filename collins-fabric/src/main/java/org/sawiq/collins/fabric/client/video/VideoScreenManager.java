@@ -226,6 +226,29 @@ public final class VideoScreenManager {
                 if (st.playing()) s.stop();
                 continue;
             }
+
+            if (st != null && client.world != null) {
+                int minChunkX = st.minX() >> 4;
+                int maxChunkX = st.maxX() >> 4;
+                int minChunkZ = st.minZ() >> 4;
+                int maxChunkZ = st.maxZ() >> 4;
+
+                boolean anyChunkUnloaded = false;
+                for (int x = minChunkX; x <= maxChunkX; x++) {
+                    for (int z = minChunkZ; z <= maxChunkZ; z++) {
+                        if (!client.world.isChunkLoaded(x, z)) {
+                            anyChunkUnloaded = true;
+                            break;
+                        }
+                    }
+                    if (anyChunkUnloaded) break;
+                }
+
+                if (anyChunkUnloaded) {
+                    s.destroy();
+                    continue;
+                }
+            }
             s.tickPlayback(pos, radius, globalVolume, serverNowMs);
         }
 

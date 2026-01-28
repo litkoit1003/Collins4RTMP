@@ -41,7 +41,16 @@ public final class VideoScreenRenderer {
 
         for (VideoScreen screen : VideoScreenManager.all()) {
             screen.renderPlayback();
-            if (!screen.hasTexture()) continue;
+
+            if (!screen.hasTexture() || screen.textureId() == null) continue;
+
+            ScreenState s = screen.state();
+            int chunkX = s.minX() >> 4;
+            int chunkZ = s.minZ() >> 4;
+            if (!client.world.isChunkLoaded(chunkX, chunkZ)) {
+                continue;
+            }
+
             drawScreen(entry, consumers, cam, screen.state(), screen.textureId());
         }
 

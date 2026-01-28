@@ -537,6 +537,31 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
         mutedByRadius = false;
         outOfRadiusSinceMs = 0;
+
+        // Очищаем текстуру
+        if (texture != null && texture.getImage() != null) {
+            try {
+                texture.getImage().fillRect(0, 0, texW, texH, 0x00000000);
+                texture.upload();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public void destroy() {
+        stop();
+
+        if (texture != null) {
+            try {
+                texture.close();
+            } catch (Exception ignored) {}
+            texture = null;
+        }
+
+        texId = null;
+        nativePtr = 0;
+        nativeDst = null;
+
+        freeBuffers.clear();
     }
 
     // ===== FrameSink: эти методы могут вызываться ИЗ ДЕКОДЕР-ПОТОКА =====
