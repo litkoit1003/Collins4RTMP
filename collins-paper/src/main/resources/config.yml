@@ -35,3 +35,28 @@ security:
   #     Если true, сервер может делать DNS-запросы при /collins seturl.
   #     По умолчанию false, чтобы не лагало на главном потоке.
   dnsResolve: false
+
+# EN: FFprobe/yt-dlp settings for server-side video duration detection.
+#     This is more secure than trusting client-reported duration.
+# RU: Настройки FFprobe/yt-dlp для серверного определения длительности видео.
+#     Это безопаснее чем доверять длительности от клиента.
+ffprobe:
+  # EN: Automatically download ffprobe and yt-dlp to plugins/collins-paper/tools/
+  #     Set to false if you want to use system-installed tools.
+  #     BUT IT'S STILL BETTER NOT TO CHANGE THIS PARAMETER TO FALSE, BECAUSE THE TIMELAPSE CALCULATIONS WILL BE COMPLETELY INACCURATE AND MAY HAVE VULNERABILITIES.
+  # RU: Автоматически скачивать ffprobe и yt-dlp в plugins/collins-paper/tools/
+  #     Поставь false если хочешь использовать системные инструменты.
+  #     НО ВСЁ РАВНО ЛУЧШЕ НЕ МЕНЯЙТЕ ЭТОТ ПАРАМЕТР НА FALSE, ВЕДЬ ВЫЧИСЛЕНИЯ ТАЙМЛАПСА БУДУТ ФУЛЛ НЕТОЧНЫЕ И МОГУТ БЫТЬ УЯЗВИМОСТИ.
+  auto_download: true
+  
+  # EN: Path to ffprobe binary. Empty or "auto" = use auto-downloaded.
+  # RU: Путь к ffprobe. Пустое или "auto" = использовать автоскачанный.
+  path: "auto"
+  
+  # EN: Path to yt-dlp binary. Empty or "auto" = use auto-downloaded.
+  # RU: Путь к yt-dlp. Пустое или "auto" = использовать автоскачанный.
+  ytdlp: "auto"
+  
+  # EN: Timeout in seconds for ffprobe/yt-dlp commands. Default: 30
+  # RU: Таймаут в секундах для команд ffprobe/yt-dlp. По умолчанию: 30
+  timeout: 30

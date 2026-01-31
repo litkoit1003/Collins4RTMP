@@ -26,7 +26,7 @@ public final class VideoScreenManager {
     private static final Set<String> SHOWN_DELETE_PROMPT = ConcurrentHashMap.newKeySet();
     // Путь к файлу для удаления (последний предложенный)
     private static volatile String pendingDeletePath = null;
-
+    
     private static final int GREEN = 0x00FF00;
     private static final int GRAY = 0xAAAAAA;
     private static final int YELLOW = 0xFFFF55;
@@ -91,6 +91,15 @@ public final class VideoScreenManager {
     }
 
     public static VideoScreen findNearestPlaying(Vec3d playerPos) {
+        return findNearestPlayingInternal(playerPos, false);
+    }
+
+    /** Находит ближайший экран, включая закончившиеся (для HUD) */
+    public static VideoScreen findNearestPlayingOrEnded(Vec3d playerPos) {
+        return findNearestPlayingInternal(playerPos, true);
+    }
+
+    private static VideoScreen findNearestPlayingInternal(Vec3d playerPos, boolean includeEnded) {
         if (playerPos == null) return null;
 
         MinecraftClient client = MinecraftClient.getInstance();
@@ -102,7 +111,9 @@ public final class VideoScreenManager {
             ScreenState st = s.state();
             if (st == null) continue;
             if (!isCompatibleWithCurrentWorld(st, client)) continue;
-            if (!st.playing()) continue;
+            // Для HUD учитываем ended экраны
+            boolean shouldInclude = st.playing() || (includeEnded && s.hasEnded());
+            if (!shouldInclude) continue;
             if (st.url() == null || st.url().isEmpty()) continue;
 
             double cx = (st.minX() + st.maxX() + 1) * 0.5;
@@ -269,10 +280,20 @@ public final class VideoScreenManager {
                         int pct = nearest.getDownloadPercent();
                         long dlMb = nearest.getDownloadedMb();
                         long totalMb = nearest.getDownloadTotalMb();
-                        if (totalMb > 0) {
+                        
+                        // YouTube-specific messages
+                        if (nearest.isResolvingYouTube()) {
+                            if (nearest.isDownloadingYtdlp()) {
+                                text = "🔧 Установка yt-dlp: " + pct + "%";
+                            } else {
+                                text = "▶ YouTube: получение ссылки...";
+                            }
+                        } else if (totalMb > 0) {
                             text = "⏬ Скачивание: " + pct + "% (" + dlMb + "МБ / " + totalMb + "МБ)";
-                        } else {
+                        } else if (dlMb > 0) {
                             text = "⏬ Скачивание: " + dlMb + "МБ...";
+                        } else {
+                            text = "⏬ Подготовка видео...";
                         }
                         color = YELLOW;
                     } else {
@@ -338,5 +359,10 @@ public final class VideoScreenManager {
     /** Очистить кэш сохранённых предложений */
     public static void clearDeletePromptHistory() {
         SHOWN_DELETE_PROMPT.clear();
+    }
+
+    /** Очистить путь для удаления */
+    public static void clearPendingDeletePath() {
+        pendingDeletePath = null;
     }
 }

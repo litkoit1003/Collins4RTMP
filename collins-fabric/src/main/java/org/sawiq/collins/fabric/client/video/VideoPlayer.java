@@ -37,7 +37,7 @@ public final class VideoPlayer {
     }
 
 
-    private static final boolean DEBUG = true;
+    private static final boolean DEBUG = false;
 
     private static void dbg(String msg) {
         if (!DEBUG) return;
@@ -751,6 +751,63 @@ public final class VideoPlayer {
         url = originalUrl;
 
         dbg("playOnce: originalUrl=" + originalUrl + " blocks=" + blocksW + "x" + blocksH + " seekMs=" + seekMs);
+
+        // YouTube URL resolution
+        if (YouTubeResolver.isYouTubeUrl(originalUrl)) {
+            dbg("playOnce: detected YouTube URL, resolving...");
+            sink.onDownloadStart("collins.video.youtube_resolving");
+            
+            YouTubeResolver.YouTubeResult ytResult = YouTubeResolver.resolve(originalUrl);
+            
+            if (sessionId != mySessionId || !running) {
+                dbg("playOnce: session changed during YouTube resolution, aborting");
+                return false;
+            }
+            
+            if (ytResult.needsDownload() && !YouTubeResolver.isYtdlpAvailable()) {
+                dbg("playOnce: yt-dlp not available, starting download...");
+                sink.onDownloadProgress(0, 0, 0);
+                YouTubeResolver.downloadYtdlpAsync();
+                
+                // Wait for yt-dlp download with progress updates
+                int maxWait = 120; // 2 minutes max
+                int waited = 0;
+                while (YouTubeResolver.isDownloading() && waited < maxWait) {
+                    if (sessionId != mySessionId || !running) return false;
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                    waited++;
+                    int progress = YouTubeResolver.getDownloadProgress();
+                    sink.onDownloadProgress(progress, 0, 0);
+                    dbg("playOnce: waiting for yt-dlp download... " + progress + "%");
+                }
+                
+                // Retry resolution after download
+                ytResult = YouTubeResolver.resolve(originalUrl);
+            }
+            
+            if (!ytResult.isSuccess()) {
+                dbg("playOnce: YouTube resolution failed: " + ytResult.error());
+                return false;
+            }
+            
+            url = ytResult.directUrl();
+            dbg("playOnce: YouTube resolved to: " + url.substring(0, Math.min(100, url.length())) + "...");
+            sink.onDownloadComplete();
+            
+            // Отправляем duration от yt-dlp на сервер (FFmpeg часто не получает duration из YouTube стримов)
+            if (ytResult.durationMs() > 0) {
+                dbg("playOnce: YouTube duration from yt-dlp: " + (ytResult.durationMs() / 1000) + "s");
+                sink.onDuration(ytResult.durationMs());
+            }
+            
+            // YouTube streams are usually well-supported by FFmpeg directly
+            // No need for disk caching - stream directly
+        }
 
         boolean forceMp4Demuxer = false;
 

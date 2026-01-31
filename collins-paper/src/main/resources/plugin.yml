@@ -1,5 +1,5 @@
 name: collins-paper
-version: 0.1.0
+version: 1.0
 main: org.sawiq.collins.paper.CollinsPaperPlugin
 api-version: "1.21"
 

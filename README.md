@@ -29,6 +29,7 @@ This repository includes two parts that work together:
 
 #### Client mod (Collins Fabric)
 - **Video playback on screens**: render video frames directly in-world.
+- **YouTube support**: paste YouTube links directly — they work out of the box.
 - **Audio playback**: client-side audio with local volume control.
 - **Actionbar timeline**: optional live timeline display near active screens.
 - **Config menu** (ModMenu): toggle rendering, set local volume, toggle actionbar timeline.
@@ -37,6 +38,8 @@ This repository includes two parts that work together:
 
 #### Server plugin (Collins Paper)
 - **Create and manage screens**: server controls what plays on each screen.
+- **Playlists**: create playlists with multiple videos, auto-advancement, and loop support.
+- **YouTube support**: YouTube links are automatically resolved to playable streams.
 - **Playback control commands**: play/stop/seek utilities (including backward seek).
 - **Synced state broadcast**: clients receive the screen state and play it locally.
 
@@ -94,6 +97,20 @@ This repository includes two parts that work together:
 - `/collins radius reset`
     - Resets hear radius to **100**.
 
+#### Playlists
+- `/collins playlist <screen> add <url>`
+    - Adds a video to the screen's playlist.
+- `/collins playlist <screen> list`
+    - Shows all videos in the playlist.
+- `/collins playlist <screen> play [index]`
+    - Starts playing from the playlist (optionally from a specific index).
+- `/collins playlist <screen> next` / `prev`
+    - Skips to the next or previous video.
+- `/collins playlist <screen> loop <true/false>`
+    - Enables or disables playlist looping.
+- `/collins playlist <screen> clear`
+    - Clears the playlist.
+
 #### Management
 - `/collins list`
     - Lists all screens, showing URL and playing state.
@@ -121,6 +138,7 @@ Found a bug or have an idea? Please open an issue on GitHub.
 
 #### Клиент (Collins Fabric)
 - **Проигрывание видео на экранах**: видео отображается прямо в мире.
+- **Поддержка YouTube**: вставляй ссылки с YouTube — они работают сразу.
 - **Звук**: звук проигрывается на клиенте, есть локальная регулировка громкости.
 - **Таймлайн в actionbar**: опционально показывает прогресс рядом с активными экранами.
 - **Меню настроек** (ModMenu): тумблер рендера, локальная громкость, таймлайн в actionbar.
@@ -129,6 +147,8 @@ Found a bug or have an idea? Please open an issue on GitHub.
 
 #### Сервер (Collins Paper)
 - **Создание и управление экранами**: сервер задаёт что и где проигрывается.
+- **Плейлисты**: создавай плейлисты с несколькими видео, автопереключением и зацикливанием.
+- **Поддержка YouTube**: ссылки с YouTube автоматически резолвятся в воспроизводимые потоки.
 - **Команды управления**: play/stop/seek (включая перемотку назад).
 - **Синхронизация состояния**: клиентам отправляется состояние экранов, проигрывание идёт локально.
 
@@ -187,6 +207,20 @@ Found a bug or have an idea? Please open an issue on GitHub.
     - Задаёт **радиус слышимости** (на каком расстоянии клиент слышит/отслеживает звук).
 - `/collins radius reset`
     - Сброс радиуса слышимости на **100**.
+
+#### Плейлисты
+- `/collins playlist <screen> add <url>`
+    - Добавляет видео в плейлист экрана.
+- `/collins playlist <screen> list`
+    - Показывает все видео в плейлисте.
+- `/collins playlist <screen> play [index]`
+    - Запускает воспроизведение из плейлиста (можно указать индекс).
+- `/collins playlist <screen> next` / `prev`
+    - Переключает на следующее или предыдущее видео.
+- `/collins playlist <screen> loop <true/false>`
+    - Включает или выключает зацикливание плейлиста.
+- `/collins playlist <screen> clear`
+    - Очищает плейлист.
 
 #### Управление
 - `/collins list`
