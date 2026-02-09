@@ -100,7 +100,7 @@ public final class CollinsClientCommands {
 
         // Если нет сохранённого пути, попробуем найти от ближайшего ended экрана
         if (path == null || path.isEmpty()) {
-            VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getPos());
+            VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getEntityPos());
             if (screen != null && screen.hasCachedFile()) {
                 path = screen.getCachedFilePath();
             }

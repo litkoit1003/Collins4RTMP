@@ -755,6 +755,7 @@ public final class CollinsCommand implements TabExecutor {
                 u.startsWith("rtsp://") ||
                 u.startsWith("rtsps://") ||
                 u.contains(".m3u8");
+    }
     // ==================== Playlist Commands ====================
 
     private boolean handlePlaylist(Player p, String[] args) {
