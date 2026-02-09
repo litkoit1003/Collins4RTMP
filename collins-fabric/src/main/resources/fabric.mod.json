@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "collins4rtmp-fabric",
-  "version": "0.2.0+1.21.10",
+  "version": "0.2.1+1.21.10",
   "name": "collins4rtmp-fabric",
   "description": "Collins with RTMP, RTSP, HLS? support. Based on collins by imsawiq, licensed under MIT.",
   "authors": ["litkoit1003", "sawiq_", "Zorsh", "EssciZ"],

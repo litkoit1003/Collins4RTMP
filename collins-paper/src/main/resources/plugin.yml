@@ -1,5 +1,5 @@
 name: collins4rtmp-paper
-version: 0.2.0+1.21.10
+version: 0.2.1+1.21.10
 main: org.sawiq.collins.paper.CollinsPaperPlugin
 api-version: "1.21"
 
