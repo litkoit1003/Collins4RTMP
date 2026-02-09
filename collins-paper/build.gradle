@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "org.sawiq"
-version = "0.2.1+1.21.10"
+version = "v1.0+1.21.10"
 
 repositories {
     mavenCentral()

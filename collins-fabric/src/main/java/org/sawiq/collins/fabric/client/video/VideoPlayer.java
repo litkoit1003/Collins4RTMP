@@ -46,7 +46,7 @@ public final class VideoPlayer {
                 u.contains(".m3u8"); // HLS
     }
 
-    private static final boolean DEBUG = true;
+    private static final boolean DEBUG = false;
 
     private static void dbg(String msg) {
         if (!DEBUG) return;
@@ -762,6 +762,63 @@ public final class VideoPlayer {
 
         dbg("playOnce: originalUrl=" + originalUrl + " blocks=" + blocksW + "x" + blocksH + " seekMs=" + seekMs);
 
+        // YouTube URL resolution
+        if (YouTubeResolver.isYouTubeUrl(originalUrl)) {
+            dbg("playOnce: detected YouTube URL, resolving...");
+            sink.onDownloadStart("collins.video.youtube_resolving");
+
+            YouTubeResolver.YouTubeResult ytResult = YouTubeResolver.resolve(originalUrl);
+
+            if (sessionId != mySessionId || !running) {
+                dbg("playOnce: session changed during YouTube resolution, aborting");
+                return false;
+            }
+
+            if (ytResult.needsDownload() && !YouTubeResolver.isYtdlpAvailable()) {
+                dbg("playOnce: yt-dlp not available, starting download...");
+                sink.onDownloadProgress(0, 0, 0);
+                YouTubeResolver.downloadYtdlpAsync();
+
+                // Wait for yt-dlp download with progress updates
+                int maxWait = 120; // 2 minutes max
+                int waited = 0;
+                while (YouTubeResolver.isDownloading() && waited < maxWait) {
+                    if (sessionId != mySessionId || !running) return false;
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                    waited++;
+                    int progress = YouTubeResolver.getDownloadProgress();
+                    sink.onDownloadProgress(progress, 0, 0);
+                    dbg("playOnce: waiting for yt-dlp download... " + progress + "%");
+                }
+
+                // Retry resolution after download
+                ytResult = YouTubeResolver.resolve(originalUrl);
+            }
+
+            if (!ytResult.isSuccess()) {
+                dbg("playOnce: YouTube resolution failed: " + ytResult.error());
+                return false;
+            }
+
+            url = ytResult.directUrl();
+            dbg("playOnce: YouTube resolved to: " + url.substring(0, Math.min(100, url.length())) + "...");
+            sink.onDownloadComplete();
+
+            // Отправляем duration от yt-dlp на сервер (FFmpeg часто не получает duration из YouTube стримов)
+            if (ytResult.durationMs() > 0) {
+                dbg("playOnce: YouTube duration from yt-dlp: " + (ytResult.durationMs() / 1000) + "s");
+                sink.onDuration(ytResult.durationMs());
+            }
+
+            // YouTube streams are usually well-supported by FFmpeg directly
+            // No need for disk caching - stream directly
+        }
+
         boolean forceMp4Demuxer = false;
 
         int videoW;
@@ -973,6 +1030,7 @@ public final class VideoPlayer {
                     dbg("playOnce: local file check path=" + url + " exists=" + exists + " size=" + size + " readable=" + readable);
 
                     if (exists && size > 0) {
+                        // Читаем первые байты для проверки
                         try (var fis = Files.newInputStream(p)) {
                             byte[] header = new byte[8];
                             int read = fis.read(header);
@@ -1009,6 +1067,7 @@ public final class VideoPlayer {
                         if (Files.exists(badFile)) {
                             dbg("playOnce: deleting corrupted cache file: " + url);
                             Files.deleteIfExists(badFile);
+                            // Удаляем из DISK_CACHE_LAST_FAIL_MS чтобы можно было перезагрузить
                             String hash = sha256Hex(originalUrl.trim());
                             DISK_CACHE_LAST_FAIL_MS.remove(hash);
                         }
@@ -1214,7 +1273,9 @@ public final class VideoPlayer {
 
                     if (!hasAnyAudio) {
                         // без аудио: декодер бежит пока буфер не полон
+                        // пейсинг делается на render thread
                         while (running && !sink.canAcceptFrame()) {
+                            // буфер полон - ждём пока render thread освободит место
                             LockSupport.parkNanos(1_000_000L); // 1ms
                             if (Thread.interrupted()) {
                                 dbg("playOnce: interrupted while waiting for buffer space");
@@ -1223,9 +1284,9 @@ public final class VideoPlayer {
                         }
                     }
 
-                    long convertStart = System.nanoTime();
+                    long convertStart = System.nanoTime(); // ПОСЛЕ пейсинга
 
-                    // получаем буфер из пула
+                    // получаем буфер из пула (управляется VideoScreen)
                     int[] out = sink.borrowBuffer();
                     if (out == null) {
                         // пул пуст - ждём
@@ -1326,6 +1387,7 @@ public final class VideoPlayer {
     }
 
     private static void applyNetOptions(FFmpegFrameGrabber g, String url) {
+        // Применяем сетевые опции только для HTTP/HTTPS/RTMP/RTMPS URL.
         boolean isHttp = url != null && (url.startsWith("http://") || url.startsWith("https://"));
         boolean isRtmp = url != null && (url.toLowerCase().startsWith("rtmp://") || url.toLowerCase().startsWith("rtmps://"));
         boolean isRtsp = url != null && (url.toLowerCase().startsWith("rtsp://") || url.toLowerCase().startsWith("rtsps://"));

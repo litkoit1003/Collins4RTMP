@@ -18,7 +18,7 @@ public final class VideoScreenRenderer {
     private static final double EPS = 0.01; // насколько "над блоком" рисуем
 
     private VideoScreenRenderer() {}
-    
+
     public static void render(MatrixStack matrices, float tickDelta) {
         if (matrices == null) return;
 
@@ -40,6 +40,8 @@ public final class VideoScreenRenderer {
         }
 
         for (VideoScreen screen : VideoScreenManager.all()) {
+            ScreenState st = screen.state();
+            if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
             screen.renderPlayback();
 
             if (!screen.hasTexture() || screen.textureId() == null) continue;

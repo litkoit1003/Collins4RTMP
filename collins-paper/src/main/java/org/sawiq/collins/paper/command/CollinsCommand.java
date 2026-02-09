@@ -4,11 +4,13 @@ import org.bukkit.block.Block;
 import org.bukkit.command.*;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.sawiq.collins.paper.model.Playlist;
 import org.sawiq.collins.paper.model.Screen;
 import org.sawiq.collins.paper.net.CollinsMessenger;
 import org.sawiq.collins.paper.selection.SelectionService;
 import org.sawiq.collins.paper.selection.SelectionVisualizer;
 import org.sawiq.collins.paper.state.CollinsRuntimeState;
+import org.sawiq.collins.paper.store.PlaylistStore;
 import org.sawiq.collins.paper.store.ScreenStore;
 import org.sawiq.collins.paper.util.Lang;
 import org.sawiq.collins.paper.util.ScreenFactory;
@@ -25,6 +27,7 @@ public final class CollinsCommand implements TabExecutor {
 
     private final JavaPlugin plugin;
     private final ScreenStore store;
+    private final PlaylistStore playlistStore;
     private final CollinsMessenger messenger;
     private final SelectionService selection;
     private final CollinsRuntimeState runtime;
@@ -34,12 +37,14 @@ public final class CollinsCommand implements TabExecutor {
 
     public CollinsCommand(JavaPlugin plugin,
                           ScreenStore store,
+                          PlaylistStore playlistStore,
                           CollinsMessenger messenger,
                           SelectionService selection,
                           CollinsRuntimeState runtime,
                           Lang lang) {
         this.plugin = plugin;
         this.store = store;
+        this.playlistStore = playlistStore;
         this.messenger = messenger;
         this.selection = selection;
         this.runtime = runtime;
@@ -358,6 +363,38 @@ public final class CollinsCommand implements TabExecutor {
                 }
 
                 long nextMs = Math.max(0L, curMs + deltaMs);
+
+                // Проверяем если seek дальше конца видео
+                long duration = pb.durationMs;
+                if (duration > 0 && nextMs >= duration && !s.loop()) {
+                    // Проверяем плейлист
+                    Playlist playlist = Playlist.get(s.name());
+                    if (playlist != null && playlist.isEnabled() && !playlist.isEmpty()) {
+                        Playlist.PlaylistEntry nextEntry = playlist.next();
+                        if (nextEntry != null) {
+                            // Переключаем на следующее видео
+                            plugin.getLogger().info("Seek past end, playlist advance for '" + s.name() + "' -> [" + nextEntry.index() + "] " + nextEntry.title());
+                            playVideoFromPlaylist(p, s, nextEntry);
+                            playlistStore.save();
+                            lang.send(p, "cmd.seeked_playlist_next", lang.vars(
+                                    "name", s.name(),
+                                    "index", nextEntry.index(),
+                                    "title", nextEntry.title()
+                            ));
+                            return true;
+                        }
+                    }
+                    // Нет плейлиста или закончился - останавливаем
+                    Screen updated = s.withPlaying(false);
+                    store.put(updated);
+                    store.save();
+                    runtime.resetPlayback(s.name());
+                    messenger.requestBroadcastSync();
+                    lang.send(p, "cmd.seeked_end", lang.vars("name", s.name()));
+                    plugin.getLogger().info(p.getName() + " seek past end '" + name + "' -> stopped");
+                    return true;
+                }
+
                 pb.basePosMs = nextMs;
                 pb.startEpochMs = s.playing() ? now : 0L;
 
@@ -512,6 +549,10 @@ public final class CollinsCommand implements TabExecutor {
                 return true;
             }
 
+            case "playlist" -> {
+                return handlePlaylist(p, args);
+            }
+
             default -> {
                 lang.send(p, "error.usage", lang.vars("usage", "/collins"));
                 return true;
@@ -529,7 +570,7 @@ public final class CollinsCommand implements TabExecutor {
                     "play", "stop", "pause", "resume",
                     "seek", "back",
                     "volume", "radius",
-                    "remove", "list"
+                    "remove", "list", "playlist"
             ));
         }
 
@@ -542,6 +583,22 @@ public final class CollinsCommand implements TabExecutor {
             }
             if (sub.equals("volume") || sub.equals("radius")) {
                 return startsWith(args[1], List.of("set", "reset"));
+            }
+            if (sub.equals("playlist")) {
+                List<String> names = new ArrayList<>();
+                for (Screen s : store.all()) names.add(s.name());
+                return startsWith(args[1], names);
+            }
+        }
+
+        if (args.length == 3 && args[0].equalsIgnoreCase("playlist")) {
+            return startsWith(args[2], List.of("add", "remove", "play", "next", "prev", "list", "clear", "loop", "enable", "disable"));
+        }
+
+        if (args.length == 4 && args[0].equalsIgnoreCase("playlist")) {
+            String action = args[2].toLowerCase(Locale.ROOT);
+            if (action.equals("loop")) {
+                return startsWith(args[3], List.of("on", "off"));
             }
         }
 
@@ -698,5 +755,263 @@ public final class CollinsCommand implements TabExecutor {
                 u.startsWith("rtsp://") ||
                 u.startsWith("rtsps://") ||
                 u.contains(".m3u8");
+    // ==================== Playlist Commands ====================
+
+    private boolean handlePlaylist(Player p, String[] args) {
+        // /collins playlist <screen> <action> [args...]
+        if (args.length < 2) {
+            lang.send(p, "playlist.usage");
+            showPlaylistHelp(p);
+            return true;
+        }
+
+        String screenName = args[1];
+        Screen screen = store.get(screenName);
+        if (screen == null) {
+            lang.send(p, "error.screen_not_found", lang.vars("name", screenName));
+            return true;
+        }
+
+        if (args.length < 3) {
+            return showPlaylistInfo(p, screenName);
+        }
+
+        String action = args[2].toLowerCase(Locale.ROOT);
+
+        switch (action) {
+            case "add" -> {
+                if (args.length < 4) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins playlist " + screenName + " add <url>"));
+                    return true;
+                }
+                String url = args[3];
+                String safeUrl = validateAndNormalizeUrl(url);
+                if (safeUrl == null) {
+                    lang.send(p, "error.invalid_url");
+                    return true;
+                }
+
+                Playlist playlist = Playlist.getOrCreate(screenName);
+                int index = playlist.add(safeUrl);
+                Playlist.PlaylistEntry entry = playlist.get(index);
+
+                lang.send(p, "playlist.added", lang.vars("index", index, "title", entry.title()));
+                playlistStore.save();
+                plugin.getLogger().info(p.getName() + " playlist add '" + screenName + "' [" + index + "] " + url);
+                return true;
+            }
+
+            case "remove" -> {
+                if (args.length < 4) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins playlist " + screenName + " remove <index>"));
+                    return true;
+                }
+                int index;
+                try {
+                    index = Integer.parseInt(args[3]);
+                } catch (NumberFormatException e) {
+                    lang.send(p, "error.bad_number");
+                    return true;
+                }
+
+                Playlist playlist = Playlist.get(screenName);
+                if (playlist == null || playlist.isEmpty()) {
+                    lang.send(p, "playlist.empty", lang.vars("screen", screenName));
+                    return true;
+                }
+
+                if (playlist.remove(index)) {
+                    lang.send(p, "playlist.removed", lang.vars("index", index));
+                    playlistStore.save();
+                    plugin.getLogger().info(p.getName() + " playlist remove '" + screenName + "' [" + index + "]");
+                } else {
+                    lang.send(p, "playlist.index_out_of_range", lang.vars("max", playlist.size()));
+                }
+                return true;
+            }
+
+            case "play" -> {
+                if (args.length < 4) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins playlist " + screenName + " play <index>"));
+                    return true;
+                }
+                int index;
+                try {
+                    index = Integer.parseInt(args[3]);
+                } catch (NumberFormatException e) {
+                    lang.send(p, "error.bad_number");
+                    return true;
+                }
+
+                Playlist playlist = Playlist.get(screenName);
+                if (playlist == null || playlist.isEmpty()) {
+                    lang.send(p, "playlist.empty", lang.vars("screen", screenName));
+                    return true;
+                }
+
+                Playlist.PlaylistEntry entry = playlist.jumpTo(index);
+                if (entry == null) {
+                    lang.send(p, "playlist.index_out_of_range", lang.vars("max", playlist.size()));
+                    return true;
+                }
+
+                playVideoFromPlaylist(p, screen, entry);
+                playlistStore.save();
+                return true;
+            }
+
+            case "next" -> {
+                Playlist playlist = Playlist.get(screenName);
+                if (playlist == null || playlist.isEmpty()) {
+                    lang.send(p, "playlist.empty", lang.vars("screen", screenName));
+                    return true;
+                }
+
+                Playlist.PlaylistEntry entry = playlist.next();
+                if (entry == null) {
+                    lang.send(p, "playlist.ended");
+                    return true;
+                }
+
+                playVideoFromPlaylist(p, screen, entry);
+                playlistStore.save();
+                return true;
+            }
+
+            case "prev" -> {
+                Playlist playlist = Playlist.get(screenName);
+                if (playlist == null || playlist.isEmpty()) {
+                    lang.send(p, "playlist.empty", lang.vars("screen", screenName));
+                    return true;
+                }
+
+                Playlist.PlaylistEntry entry = playlist.previous();
+                if (entry == null) {
+                    lang.send(p, "playlist.ended");
+                    return true;
+                }
+
+                playVideoFromPlaylist(p, screen, entry);
+                playlistStore.save();
+                return true;
+            }
+
+            case "list" -> {
+                return showPlaylistInfo(p, screenName);
+            }
+
+            case "clear" -> {
+                Playlist playlist = Playlist.get(screenName);
+                if (playlist != null) {
+                    playlist.clear();
+                }
+                Playlist.remove(screenName);
+                lang.send(p, "playlist.cleared", lang.vars("screen", screenName));
+                playlistStore.save();
+                plugin.getLogger().info(p.getName() + " playlist clear '" + screenName + "'");
+                return true;
+            }
+
+            case "loop" -> {
+                if (args.length < 4) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins playlist " + screenName + " loop on|off"));
+                    return true;
+                }
+                boolean loopOn = args[3].equalsIgnoreCase("on");
+                Playlist playlist = Playlist.getOrCreate(screenName);
+                playlist.setLoop(loopOn);
+                lang.send(p, loopOn ? "playlist.loop.on" : "playlist.loop.off");
+                playlistStore.save();
+                return true;
+            }
+
+            case "enable" -> {
+                Playlist playlist = Playlist.getOrCreate(screenName);
+                playlist.setEnabled(true);
+                lang.send(p, "playlist.enabled");
+                playlistStore.save();
+                return true;
+            }
+
+            case "disable" -> {
+                Playlist playlist = Playlist.getOrCreate(screenName);
+                playlist.setEnabled(false);
+                lang.send(p, "playlist.disabled");
+                playlistStore.save();
+                return true;
+            }
+
+            default -> {
+                lang.send(p, "playlist.usage");
+                showPlaylistHelp(p);
+                return true;
+            }
+        }
+    }
+
+    private void showPlaylistHelp(Player p) {
+        lang.send(p, "playlist.help.header");
+        lang.send(p, "playlist.help.show");
+        lang.send(p, "playlist.help.add");
+        lang.send(p, "playlist.help.play");
+        lang.send(p, "playlist.help.next");
+        lang.send(p, "playlist.help.prev");
+        lang.send(p, "playlist.help.remove");
+        lang.send(p, "playlist.help.clear");
+        lang.send(p, "playlist.help.loop");
+        lang.send(p, "playlist.help.enable");
+    }
+
+    private boolean showPlaylistInfo(Player p, String screenName) {
+        Playlist playlist = Playlist.get(screenName);
+        if (playlist == null || playlist.isEmpty()) {
+            lang.send(p, "playlist.empty", lang.vars("screen", screenName));
+            lang.send(p, "playlist.empty.hint", lang.vars("screen", screenName));
+            return true;
+        }
+
+        String status = lang.raw(playlist.isEnabled() ? "playlist.status.enabled" : "playlist.status.disabled");
+        String loop = lang.raw(playlist.isLoop() ? "playlist.loop.enabled" : "playlist.loop.disabled");
+        lang.send(p, "playlist.header", lang.vars("screen", screenName, "status", status, "loop", loop));
+
+        for (Playlist.PlaylistEntry e : playlist.getEntries()) {
+            boolean current = e.index() == playlist.getCurrentIndex();
+            lang.send(p, current ? "playlist.entry.current" : "playlist.entry.normal",
+                    lang.vars("index", e.index(), "title", e.title()));
+        }
+        return true;
+    }
+
+    private void playVideoFromPlaylist(Player p, Screen screen, Playlist.PlaylistEntry entry) {
+        String url = entry.url();
+
+        // ВАЖНО: для плейлистов loop=false чтобы автопереключение работало!
+        // Loop плейлиста управляется через Playlist.isLoop(), а не через Screen.loop()
+        Screen updated = new Screen(
+                screen.name(), screen.world(),
+                screen.x1(), screen.y1(), screen.z1(),
+                screen.x2(), screen.y2(), screen.z2(),
+                screen.axis(),
+                url,
+                true,
+                false, // loop=false для плейлиста!
+                screen.volume()
+        );
+
+        runtime.resetPlayback(screen.name());
+        CollinsRuntimeState.Playback pb = runtime.get(screen.name());
+        pb.startEpochMs = System.currentTimeMillis();
+        pb.basePosMs = 0;
+
+        store.put(updated);
+        store.save();
+        messenger.requestBroadcastSync();
+
+        Playlist playlist = Playlist.get(screen.name());
+        int total = playlist != null ? playlist.size() : 0;
+        int current = playlist != null ? playlist.getCurrentIndex() : entry.index();
+
+        lang.send(p, "playlist.playing", lang.vars("current", current, "total", total, "title", entry.title()));
+        plugin.getLogger().info(p.getName() + " playlist play '" + screen.name() + "' [" + entry.index() + "] " + url);
     }
 }

@@ -107,11 +107,34 @@ public final class Lang {
         return new YamlConfiguration();
     }
 
+    /**
+     * Получает строку из конфига, обрабатывая вложенные пути (точки в ключах)
+     */
+    private String getString(String key) {
+        Object val = messages.get(key);
+        if (val instanceof String s) {
+            return s;
+        }
+        // Bukkit может вернуть MemorySection если ключ содержит точки
+        // Пробуем получить как есть
+        String s = messages.getString(key);
+        return s;
+    }
+
     public String tr(String key) {
         String raw = messages.getString(key);
         if (raw == null) raw = key;
 
         raw = raw.replace("{prefix}", prefix);
+        return color(raw);
+    }
+
+    /**
+     * Возвращает локализованную строку без prefix (для использования как часть другой строки)
+     */
+    public String raw(String key) {
+        String raw = getString(key);
+        if (raw == null) raw = key;
         return color(raw);
     }
 

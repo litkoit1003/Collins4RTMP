@@ -102,6 +102,9 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private volatile int downloadPercent = 0;
     private volatile long downloadedMb = 0;
     private volatile long downloadTotalMb = 0;
+    private volatile long downloadStartWallMs = 0;
+    private volatile boolean resolvingYouTube = false;
+    private volatile boolean downloadingYtdlp = false;
 
     public boolean isLiveStream() {
         String url = state.url();
@@ -127,31 +130,47 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         if (old == null || newState == null) return;
 
         if (!started) return;
-        if (!old.playing() || !newState.playing()) return;
 
         String ou = old.url();
         String nu = newState.url();
-        if (ou == null || nu == null) return;
-        if (!ou.equals(nu)) return;
+
+        if (!old.playing() && newState.playing()) {
+            resetForNewVideo();
+            return;
+        }
+
+        if (ou != null && nu != null && !ou.equals(nu) && newState.playing()) {
+            resetForNewVideo();
+            return;
+        }
+
+        if (!started) return;
 
         long db = Math.abs(newState.basePosMs() - old.basePosMs());
         long ds = Math.abs(newState.startEpochMs() - old.startEpochMs());
 
-        // если сервер сдвинул якоря таймлайна (seek/resume) — перезапускаем декодер
-        // НО не сбрасываем текстуру чтобы не было фиолетового экрана
         if (db > 250L || ds > 250L) {
-            // Сбрасываем только флаг ended чтобы видео могло продолжить
             ended = false;
             endedUrl = "";
             endedAtMs = 0;
-            // Останавливаем плеер но НЕ очищаем текстуру (soft stop)
             if (player != null) {
                 player.stop();
             }
-            // Сбрасываем флаги для перезапуска
             started = false;
             startedUrl = "";
         }
+    }
+
+    private void resetForNewVideo() {
+        ended = false;
+        endedUrl = "";
+        endedAtMs = 0;
+        durationMs = 0;
+        if (player != null) {
+            player.stop();
+        }
+        started = false;
+        startedUrl = "";
     }
 
     public boolean hasTexture() { return texture != null && texId != null; }
@@ -500,6 +519,10 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     }
 
     public long currentPosMsForDisplay(long serverNowMs) {
+        // Во время скачивания показываем серверное время (таймлайн продолжает идти)
+        if (downloading) {
+            return currentVideoPosMs(serverNowMs);
+        }
         if (displayFrozen) {
             return clampToDuration(Math.max(0L, displayFrozenPosMs));
         }
@@ -578,6 +601,11 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         long max = 12L * 60L * 60L * 1000L;
         if (d > max) d = 0L;
         this.durationMs = d;
+
+        // Отправляем длительность серверу для автоопределения окончания
+        if (d > 0 && state != null) {
+            org.sawiq.collins.fabric.client.net.CollinsNet.sendVideoDuration(state.name(), d);
+        }
     }
 
     @Override
@@ -592,6 +620,8 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.displayFrozen = true;
         this.displayFrozenPosMs = this.durationMs;
         this.displayWallStartNs = 0;
+
+        // Сервер сам определяет окончание видео по времени (безопаснее чем клиентское сообщение)
     }
 
     @Override
@@ -633,7 +663,15 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.playbackStartNs = wallStartNs;
         this.displayWallStartNs = wallStartNs;
         this.displayFrozen = false;
-        this.displayStartPosMs = this.displayFrozenPosMs;
+
+        // Если было скачивание, учитываем время которое прошло
+        if (downloadStartWallMs > 0) {
+            long downloadDurationMs = System.currentTimeMillis() - downloadStartWallMs;
+            this.displayStartPosMs = this.displayFrozenPosMs + downloadDurationMs;
+            downloadStartWallMs = 0;
+        } else {
+            this.displayStartPosMs = this.displayFrozenPosMs;
+        }
     }
 
     @Override
@@ -666,6 +704,18 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.downloadPercent = 0;
         this.downloadedMb = 0;
         this.downloadTotalMb = 0;
+
+        // Запоминаем время начала скачивания для корректной синхронизации таймлайна
+        this.downloadStartWallMs = System.currentTimeMillis();
+
+        // Track YouTube-specific states
+        if (message != null) {
+            this.resolvingYouTube = message.contains("youtube");
+            this.downloadingYtdlp = message.contains("ytdlp");
+        } else {
+            this.resolvingYouTube = false;
+            this.downloadingYtdlp = false;
+        }
     }
 
     @Override
@@ -685,6 +735,8 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     public int getDownloadPercent() { return downloadPercent; }
     public long getDownloadedMb() { return downloadedMb; }
     public long getDownloadTotalMb() { return downloadTotalMb; }
+    public boolean isResolvingYouTube() { return resolvingYouTube; }
+    public boolean isDownloadingYtdlp() { return downloadingYtdlp; }
 
     // Информация о кэшированном файле (для предложения удаления)
     private volatile String cachedFilePath = null;

@@ -185,4 +185,77 @@ public final class CollinsNet {
             if (DEBUG) System.out.println("[Collins] SYNC v2 received: " + count + " screens");
         }
     }
+
+    // ==================== C2S (клиент -> сервер) ====================
+
+    private static final byte MSG_VIDEO_ENDED = 2;
+    private static final byte MSG_VIDEO_DURATION = 3;
+    private static final int PROTOCOL_VERSION = 2;
+
+    /**
+     * Отправляет сообщение серверу об окончании видео на экране
+     */
+    public static void sendVideoEnded(String screenName) {
+        try {
+            java.io.ByteArrayOutputStream bout = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bout);
+
+            // Inner payload
+            out.writeByte(MSG_VIDEO_ENDED);
+            out.writeInt(PROTOCOL_VERSION);
+            out.writeUTF(screenName);
+            out.flush();
+            byte[] inner = bout.toByteArray();
+
+            // Wrapped payload
+            bout = new java.io.ByteArrayOutputStream();
+            out = new java.io.DataOutputStream(bout);
+            out.write("COLL".getBytes(StandardCharsets.US_ASCII));
+            out.writeInt(inner.length);
+            out.write(inner);
+            out.flush();
+
+            byte[] payload = bout.toByteArray();
+            ClientPlayNetworking.send(new org.sawiq.collins.fabric.net.CollinsMainC2SPayload(payload));
+
+            if (DEBUG) System.out.println("[Collins] Sent VIDEO_ENDED for screen: " + screenName);
+        } catch (Exception e) {
+            if (DEBUG) System.out.println("[Collins] Failed to send VIDEO_ENDED: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Отправляет серверу длительность видео (для автоматического завершения)
+     */
+    public static void sendVideoDuration(String screenName, long durationMs) {
+        if (durationMs <= 0) return;
+
+        try {
+            java.io.ByteArrayOutputStream bout = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bout);
+
+            // Inner payload
+            out.writeByte(MSG_VIDEO_DURATION);
+            out.writeInt(PROTOCOL_VERSION);
+            out.writeUTF(screenName);
+            out.writeLong(durationMs);
+            out.flush();
+            byte[] inner = bout.toByteArray();
+
+            // Wrapped payload
+            bout = new java.io.ByteArrayOutputStream();
+            out = new java.io.DataOutputStream(bout);
+            out.write("COLL".getBytes(StandardCharsets.US_ASCII));
+            out.writeInt(inner.length);
+            out.write(inner);
+            out.flush();
+
+            byte[] payload = bout.toByteArray();
+            ClientPlayNetworking.send(new org.sawiq.collins.fabric.net.CollinsMainC2SPayload(payload));
+
+            if (DEBUG) System.out.println("[Collins] Sent VIDEO_DURATION for screen: " + screenName + " duration=" + durationMs + "ms");
+        } catch (Exception e) {
+            if (DEBUG) System.out.println("[Collins] Failed to send VIDEO_DURATION: " + e.getMessage());
+        }
+    }
 }
